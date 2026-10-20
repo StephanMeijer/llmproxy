@@ -1,4 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::indexing_slicing,
+    reason = "HeaderMap and Value indexing in assertions; a missing key should fail the test"
+)]
 
 use std::{
     convert::Infallible,

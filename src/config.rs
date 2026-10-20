@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, env, fmt, fs, net::SocketAddr, path::Path, time
 
 use serde::{Deserialize, Deserializer, de::Error as _};
 
-const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(120);
+const DEFAULT_MAX_WAIT: Duration = Duration::from_mins(2);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;
 
@@ -73,15 +73,15 @@ pub struct LimitConfig {
     pub max_inflight: Option<usize>,
 }
 
-fn default_max_wait() -> Duration {
+const fn default_max_wait() -> Duration {
     DEFAULT_MAX_WAIT
 }
 
-fn default_connect_timeout() -> Duration {
+const fn default_connect_timeout() -> Duration {
     DEFAULT_CONNECT_TIMEOUT
 }
 
-fn default_max_body() -> usize {
+const fn default_max_body() -> usize {
     DEFAULT_MAX_BODY
 }
 
@@ -100,13 +100,20 @@ fn seconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Er
 
 impl Config {
     /// Reads `path`, expanding `${VAR}` from the process environment.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the file cannot be read, or for any error of [`Config::parse`].
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = fs::read_to_string(path)
             .map_err(|e| ConfigError(format!("read {}: {e}", path.display())))?;
         Self::parse(&text, |name| env::var(name).ok())
     }
 
-    /// Parses `text`; `lookup` resolves `${VAR}` references. An unresolved variable is an error.
+    /// Parses `text`; `lookup` resolves `${VAR}` references.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] for invalid TOML, unknown keys, an unresolved or unterminated
+    /// `${VAR}`, or an empty `proxy_token`.
     pub fn parse(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let mut value: toml::Value =
             toml::from_str(text).map_err(|e| ConfigError(format!("parse config: {e}")))?;

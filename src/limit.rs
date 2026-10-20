@@ -34,7 +34,10 @@ impl Bucket {
 
     fn refill(&mut self) {
         let now = Instant::now();
-        self.level = (self.level + (now - self.at).as_secs_f64() * self.per_sec).min(self.capacity);
+        self.level = (now - self.at)
+            .as_secs_f64()
+            .mul_add(self.per_sec, self.level)
+            .min(self.capacity);
         self.at = now;
     }
 
@@ -147,6 +150,9 @@ pub struct Limits {
 }
 
 impl Limits {
+    /// # Errors
+    /// Returns a [`ConfigError`] naming the first limit that matches nothing, limits nothing, or
+    /// has a zero rate or cap.
     pub fn new(configs: &[LimitConfig]) -> Result<Self, ConfigError> {
         Ok(Self {
             limits: configs.iter().map(Limit::new).collect::<Result<_, _>>()?,
@@ -155,7 +161,8 @@ impl Limits {
     }
 
     /// Whether any limit needs the request's `model`, i.e. the body must be parsed.
-    pub fn by_model(&self) -> bool {
+    #[must_use]
+    pub const fn by_model(&self) -> bool {
         self.by_model
     }
 
@@ -167,9 +174,14 @@ impl Limits {
         model: Option<&str>,
         tokens: usize,
     ) -> Vec<OwnedSemaphorePermit> {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "token estimates are far below 2^52"
+        )]
+        let tokens = tokens as f64;
         let mut permits = Vec::new();
         for limit in self.limits.iter().filter(|l| l.matches(path, model)) {
-            permits.extend(limit.acquire(tokens as f64).await);
+            permits.extend(limit.acquire(tokens).await);
         }
         permits
     }
@@ -217,16 +229,15 @@ mod tests {
         limits.acquire("/x", Some("big"), 60).await;
         let start = Instant::now();
         limits.acquire("/x", Some("big"), 1_000_000).await;
-        assert_eq!(start.elapsed(), Duration::from_secs(60));
+        assert_eq!(start.elapsed(), Duration::from_mins(1));
     }
 
     #[tokio::test(start_paused = true)]
     async fn inflight_cap_releases_with_the_permit() {
         let limits = Limits::new(&[cfg("name='c'\nprefixes=['/']\nmax_inflight=1")]).unwrap();
         let permits = limits.acquire("/x", None, 0).await;
-        let blocked =
-            tokio::time::timeout(Duration::from_secs(5), limits.acquire("/x", None, 0)).await;
-        assert!(blocked.is_err());
+        let held = tokio::time::timeout(Duration::from_secs(5), limits.acquire("/x", None, 0));
+        assert!(held.await.is_err());
         drop(permits);
         limits.acquire("/x", None, 0).await;
     }

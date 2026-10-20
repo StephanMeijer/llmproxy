@@ -22,5 +22,12 @@ tokio = { version = "1.54.0", features = ["test-util"] }
 unsafe_code = "forbid"
 
 [lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+indexing_slicing = "deny"
