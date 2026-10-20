@@ -1,0 +1,4 @@
+# Pinned so a new stable release cannot add pedantic/nursery lints and break the build unannounced.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]

@@ -1,17 +1,17 @@
 //! The request path: authenticate, route, hold on limits, rewrite, forward, stream back.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicI64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::{Body, Bytes, to_bytes},
     extract::{Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
@@ -20,7 +20,7 @@ use axum::{
 use futures_util::StreamExt;
 use reqwest::{Url, redirect};
 use serde_json::{Value, json};
-use tokio::time::timeout;
+use tokio::{sync::OwnedSemaphorePermit, time::timeout};
 
 use crate::{
     config::{Config, ConfigError},
@@ -131,18 +131,21 @@ impl Metrics {
     }
 
     pub fn render(&self) -> String {
-        let mut out = String::from("# TYPE llm3_http_requests_total counter\n");
-        let requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
-        for ((route, code), n) in requests.iter() {
-            out.push_str(&format!(
-                "llm3_http_requests_total{{route=\"{route}\",code=\"{code}\"}} {n}\n"
-            ));
-        }
-        out.push_str(&format!(
-            "# TYPE llm3_http_requests_in_flight gauge\nllm3_http_requests_in_flight {}\n",
+        let rows = {
+            let requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
+            requests
+                .iter()
+                .map(|((route, code), n)| {
+                    format!("llm3_http_requests_total{{route=\"{route}\",code=\"{code}\"}} {n}\n")
+                })
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        format!(
+            "# TYPE llm3_http_requests_total counter\n{rows}\
+             # TYPE llm3_http_requests_in_flight gauge\nllm3_http_requests_in_flight {}\n",
             self.in_flight.load(Ordering::Relaxed)
-        ));
-        out
+        )
     }
 }
 
@@ -164,7 +167,7 @@ impl Drop for InFlight<'_> {
 
 pub struct Proxy {
     token: String,
-    max_wait: std::time::Duration,
+    max_wait: Duration,
     max_body: usize,
     tool_choice_prefix: Option<String>,
     routes: Vec<Route>,
@@ -175,16 +178,19 @@ pub struct Proxy {
 
 impl Proxy {
     /// Validates everything that is not plain syntax: route names, URLs, headers and limits.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] naming the first invalid route or limit, or if the HTTP client
+    /// cannot be built.
     pub fn new(config: Config) -> Result<Self, ConfigError> {
         let routes = config
             .routes
             .iter()
             .map(Route::new)
             .collect::<Result<Vec<_>, _>>()?;
-        for (i, route) in routes.iter().enumerate() {
-            if routes[..i].iter().any(|r| r.name == route.name) {
-                return Err(ConfigError(format!("route {}: defined twice", route.name)));
-            }
+        let mut seen = BTreeSet::new();
+        if let Some(twice) = routes.iter().find(|r| !seen.insert(&r.name)) {
+            return Err(ConfigError(format!("route {}: defined twice", twice.name)));
         }
         // No total timeout and no redirects: streams may run long, and a redirect would carry our credential elsewhere.
         let client = reqwest::Client::builder()
@@ -202,10 +208,6 @@ impl Proxy {
             client,
             metrics: Metrics::default(),
         })
-    }
-
-    pub fn metrics(&self) -> &Metrics {
-        &self.metrics
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {
@@ -255,138 +257,146 @@ impl Proxy {
     }
 
     async fn forward(&self, route: &Route, rest: &str, parts: &Parts, body: Body) -> Response {
-        let path = parts.uri.path();
-        let Ok(mut body) = to_bytes(body, self.max_body).await else {
+        let Ok(body) = to_bytes(body, self.max_body).await else {
             return error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "body_too_large",
                 "request body exceeds max_body or could not be read",
             );
         };
+        let (body, model) = self.inspect_body(parts, body);
 
-        let rewrite_tools = parts.method == Method::POST
-            && path.ends_with(CHAT_COMPLETIONS_SUFFIX)
-            && self
-                .tool_choice_prefix
-                .as_deref()
-                .is_some_and(|p| path.starts_with(p));
-        let mut json = (rewrite_tools || self.limits.by_model())
-            .then(|| serde_json::from_slice::<Value>(&body).ok())
-            .flatten();
-        if rewrite_tools
-            && let Some(value) = json.as_mut()
-            && insert_tool_choice(value)
-        {
-            match serde_json::to_vec(value) {
-                Ok(bytes) => body = bytes.into(),
-                Err(_) => {
-                    return error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal",
-                        "could not re-encode request body",
-                    );
-                }
-            }
-        }
-
-        let model = json
-            .as_ref()
-            .and_then(|v| v.get("model"))
-            .and_then(Value::as_str);
         let queued = Instant::now();
-        let Ok(permits) = timeout(
-            self.max_wait,
-            self.limits
-                .acquire(path, model, body.len() / BYTES_PER_TOKEN),
-        )
-        .await
-        else {
-            let mut response = error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "queue_timeout",
-                "no capacity became available within max_wait",
-            );
-            response.headers_mut().insert(
-                header::RETRY_AFTER,
-                HeaderValue::from(self.max_wait.as_secs()),
-            );
-            return response;
+        let held = self.limits.acquire(
+            parts.uri.path(),
+            model.as_deref(),
+            body.len() / BYTES_PER_TOKEN,
+        );
+        let Ok(permits) = timeout(self.max_wait, held).await else {
+            return queue_timeout(self.max_wait);
         };
         let queue_wait_ms = millis(queued.elapsed());
 
-        let query = parts
-            .uri
-            .query()
-            .map(|q| format!("?{q}"))
-            .unwrap_or_default();
-        let url = Url::parse(&format!("{}{rest}{query}", route.base))
-            .ok()
-            // `url` resolves `..`; refuse anything that climbs out of the route's upstream.
-            .filter(|u| u.as_str().starts_with(&route.base));
-        let Some(url) = url else {
+        let Some(url) = upstream_url(route, rest, parts.uri.query()) else {
             return error(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
                 "path escapes the route's upstream",
             );
         };
-
-        let mut headers = HeaderMap::new();
-        for (name, value) in &parts.headers {
-            let n = name.as_str();
-            if !HOP_BY_HOP.contains(&n)
-                && !NOT_FORWARDED.contains(&n)
-                && !n.starts_with(X_FORWARDED_PREFIX)
-            {
-                headers.append(name.clone(), value.clone());
-            }
-        }
-        for (name, value) in &route.headers {
-            match value {
-                Some(v) => headers.insert(name.clone(), v.clone()),
-                None => headers.remove(name),
-            };
-        }
-
-        let upstream = match self
+        let request = self
             .client
             .request(parts.method.clone(), url)
-            .headers(headers)
-            .body(body)
-            .send()
-            .await
-        {
-            Ok(upstream) => upstream,
+            .headers(request_headers(parts, route))
+            .body(body);
+        match request.send().await {
+            Ok(upstream) => relay(route, upstream, queue_wait_ms, permits),
             Err(e) => {
                 tracing::warn!(route = route.name, error = %e, "upstream request failed");
-                return error(
+                error(
                     StatusCode::BAD_GATEWAY,
                     "upstream_error",
                     "upstream request failed",
-                );
-            }
-        };
-
-        let status = upstream.status();
-        let mut headers = HeaderMap::new();
-        for (name, value) in upstream.headers() {
-            if !HOP_BY_HOP.contains(&name.as_str()) {
-                headers.append(name.clone(), value.clone());
+                )
             }
         }
-        headers.insert(HEADER_ROUTE, route.name_header.clone());
-        headers.insert(HEADER_QUEUE_WAIT, HeaderValue::from(queue_wait_ms));
-
-        // The permits ride along in the stream, so a concurrency cap lasts until the body ends.
-        let stream = upstream.bytes_stream().map(move |chunk| {
-            let _held = &permits;
-            chunk
-        });
-        let mut response = Response::new(Body::from_stream(stream));
-        *response.status_mut() = status;
-        *response.headers_mut() = headers;
-        response
     }
+
+    /// Applies the `tool_choice` shim and reads the `model` the limits match on. The body is only
+    /// parsed when one of those needs it.
+    fn inspect_body(&self, parts: &Parts, body: Bytes) -> (Bytes, Option<String>) {
+        let path = parts.uri.path();
+        let rewrite_tools = parts.method == Method::POST
+            && path.ends_with(CHAT_COMPLETIONS_SUFFIX)
+            && self
+                .tool_choice_prefix
+                .as_deref()
+                .is_some_and(|p| path.starts_with(p));
+        let parsed = (rewrite_tools || self.limits.by_model())
+            .then(|| serde_json::from_slice::<Value>(&body).ok())
+            .flatten();
+        let Some(mut json) = parsed else {
+            return (body, None);
+        };
+        let body = if rewrite_tools && insert_tool_choice(&mut json) {
+            json.to_string().into()
+        } else {
+            body
+        };
+        let model = json.get("model").and_then(Value::as_str).map(str::to_owned);
+        (body, model)
+    }
+}
+
+/// The upstream URL for `rest`, or `None` if it resolves outside the route's upstream.
+/// `url` collapses `..` (also as `%2e%2e`), which would let a client climb out of it.
+fn upstream_url(route: &Route, rest: &str, query: Option<&str>) -> Option<Url> {
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
+    Url::parse(&format!("{}{rest}{query}", route.base))
+        .ok()
+        .filter(|u| u.as_str().starts_with(&route.base))
+}
+
+/// The client's headers minus credentials, client identity and hop-by-hop headers, then the
+/// route's own headers applied on top.
+fn request_headers(parts: &Parts, route: &Route) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (name, value) in &parts.headers {
+        let n = name.as_str();
+        if !HOP_BY_HOP.contains(&n)
+            && !NOT_FORWARDED.contains(&n)
+            && !n.starts_with(X_FORWARDED_PREFIX)
+        {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    for (name, value) in &route.headers {
+        match value {
+            Some(v) => headers.insert(name.clone(), v.clone()),
+            None => headers.remove(name),
+        };
+    }
+    headers
+}
+
+/// Streams the upstream response back. The permits ride along in the stream, so a concurrency
+/// cap lasts until the body ends.
+fn relay(
+    route: &Route,
+    upstream: reqwest::Response,
+    queue_wait_ms: u64,
+    permits: Vec<OwnedSemaphorePermit>,
+) -> Response {
+    let status = upstream.status();
+    let mut headers = HeaderMap::new();
+    for (name, value) in upstream.headers() {
+        if !HOP_BY_HOP.contains(&name.as_str()) {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    headers.insert(HEADER_ROUTE, route.name_header.clone());
+    headers.insert(HEADER_QUEUE_WAIT, HeaderValue::from(queue_wait_ms));
+
+    let stream = upstream.bytes_stream().map(move |chunk| {
+        let _held = &permits;
+        chunk
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
+}
+
+fn queue_timeout(max_wait: Duration) -> Response {
+    let mut response = error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "queue_timeout",
+        "no capacity became available within max_wait",
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(max_wait.as_secs()));
+    response
 }
 
 /// Adds `tool_choice: "auto"` when the request offers tools and does not say how to use them.
@@ -407,7 +417,7 @@ fn insert_tool_choice(body: &mut Value) -> bool {
 }
 
 /// Whole milliseconds as `u64`, which logs and headers render as a number.
-fn millis(elapsed: std::time::Duration) -> u64 {
+fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
