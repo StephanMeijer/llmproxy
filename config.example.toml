@@ -12,6 +12,8 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 
 # `/<name>/<rest>` is forwarded to `<upstream>/<rest>`. The client's Authorization and
 # x-api-key are always dropped; `headers` sets the provider credential ("" removes a header).
+# An upstream 429 is held and retried within max_wait. Add `retry_429 = false` to a route to pass it
+# on at once, for a provider whose 429 means the quota is spent (shown on the opencode route).
 
 [[route]]
 name = "minimax"
@@ -37,6 +39,7 @@ headers = { Authorization = "Bearer ${OPENROUTER_API_KEY}", X-Api-Key = "", HTTP
 name = "opencode"
 upstream = "https://opencode.ai/zen/v1"
 headers = { Authorization = "Bearer ${OPENCODE_API_KEY}", X-Api-Key = "" }
+# retry_429 = false
 
 # Limits hold requests (FIFO) until budget frees. A request may match several limits.
 # Tokens are estimated as body bytes / 4. `max_inflight` caps concurrency instead of rate.

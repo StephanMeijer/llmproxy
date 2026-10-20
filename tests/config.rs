@@ -128,6 +128,18 @@ fn non_string_durations_and_unset_variables_inside_arrays_are_rejected() {
 }
 
 #[test]
+fn retry_429_defaults_to_on_and_can_be_turned_off() {
+    let parse = |extra: &str| {
+        let text = format!("{MINIMAL}[[route]]\nname = \"a\"\nupstream = \"http://h\"\n{extra}");
+        Config::parse(&text, lookup)
+    };
+    let retries = |config: Config| config.routes.first().unwrap().retry_429;
+    assert!(retries(parse("").unwrap()));
+    assert!(!retries(parse("retry_429 = false\n").unwrap()));
+    assert!(parse("retry_429 = \"no\"\n").is_err());
+}
+
+#[test]
 fn errors_display_their_message() {
     assert_eq!(ConfigError("boom".into()).to_string(), "boom");
 }

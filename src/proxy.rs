@@ -20,7 +20,10 @@ use axum::{
 use futures_util::StreamExt;
 use reqwest::{Url, redirect};
 use serde_json::{Value, json};
-use tokio::{sync::OwnedSemaphorePermit, time::timeout};
+use tokio::{
+    sync::OwnedSemaphorePermit,
+    time::{sleep, timeout},
+};
 
 use crate::{
     config::{Config, ConfigError},
@@ -40,6 +43,13 @@ const LABEL_OTHER: &str = "other";
 
 const HEADER_ROUTE: HeaderName = HeaderName::from_static("x-proxy-route");
 const HEADER_QUEUE_WAIT: HeaderName = HeaderName::from_static("x-proxy-queue-wait-ms");
+const HEADER_RETRIES: HeaderName = HeaderName::from_static("x-proxy-retries");
+
+/// First wait before resending after an upstream 429 with no `Retry-After`; it doubles up to the cap.
+const RETRY_BACKOFF_START: Duration = Duration::from_secs(1);
+const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(10);
+/// Floor for any retry wait, so `Retry-After: 0` cannot make the proxy spin.
+const MIN_RETRY_WAIT: Duration = Duration::from_millis(250);
 
 const HOP_BY_HOP: [&str; 8] = [
     "connection",
@@ -69,6 +79,15 @@ struct Route {
     base: String,
     prefix: String,
     headers: Vec<(HeaderName, Option<HeaderValue>)>,
+    retry_429: bool,
+}
+
+/// Everything needed to send, and resend, one upstream request.
+struct Outgoing {
+    method: Method,
+    url: Url,
+    headers: HeaderMap,
+    body: Bytes,
 }
 
 impl Route {
@@ -113,6 +132,7 @@ impl Route {
             base,
             prefix: format!("/{name}/"),
             headers,
+            retry_429: cfg.retry_429,
         })
     }
 }
@@ -276,6 +296,7 @@ impl Proxy {
         let (body, model) = self.inspect_body(parts, body);
 
         let queued = Instant::now();
+        let deadline = queued + self.max_wait;
         let held = self.limits.acquire(
             parts.uri.path(),
             model.as_deref(),
@@ -295,13 +316,14 @@ impl Proxy {
                 "path escapes the route's upstream",
             );
         };
-        let request = self
-            .client
-            .request(parts.method.clone(), url)
-            .headers(request_headers(parts, route))
-            .body(body);
-        match request.send().await {
-            Ok(upstream) => relay(route, upstream, queue_wait_ms, permits),
+        let outgoing = Outgoing {
+            method: parts.method.clone(),
+            url,
+            headers: request_headers(parts, route),
+            body,
+        };
+        match self.send_upstream(route, &outgoing, deadline).await {
+            Ok((upstream, retries)) => relay(route, upstream, queue_wait_ms, retries, permits),
             Err(e) => {
                 tracing::warn!(route = route.name, error = %e, "upstream request failed");
                 error(
@@ -310,6 +332,47 @@ impl Proxy {
                     "upstream request failed",
                 )
             }
+        }
+    }
+
+    /// Sends `outgoing`. On an upstream `429` it waits and resends until `deadline`, then hands back
+    /// the last response. Returns the response and how many times the request was resent.
+    ///
+    /// shortcut: `Retry-After` HTTP-dates are ignored (the backoff is used instead), there is no
+    /// jitter, and a resend does not draw on the local rpm/tpm budget again; upgrade if a provider
+    /// needs any of them.
+    async fn send_upstream(
+        &self,
+        route: &Route,
+        outgoing: &Outgoing,
+        deadline: Instant,
+    ) -> Result<(reqwest::Response, u32), reqwest::Error> {
+        let mut backoff = RETRY_BACKOFF_START;
+        let mut retries = 0;
+        loop {
+            let response = self
+                .client
+                .request(outgoing.method.clone(), outgoing.url.clone())
+                .headers(outgoing.headers.clone())
+                .body(outgoing.body.clone())
+                .send()
+                .await?;
+            if !route.retry_429 || response.status() != StatusCode::TOO_MANY_REQUESTS {
+                return Ok((response, retries));
+            }
+            let wait = retry_after(response.headers())
+                .unwrap_or(backoff)
+                .max(MIN_RETRY_WAIT);
+            if Instant::now() + wait >= deadline {
+                // Waiting would outlast the budget: pass this 429 on now, with the provider's own headers.
+                return Ok((response, retries));
+            }
+            drop(response);
+            let waiting = Counted::new(&self.metrics.held);
+            sleep(wait).await;
+            drop(waiting);
+            retries += 1;
+            backoff = (backoff * 2).min(RETRY_BACKOFF_CAP);
         }
     }
 
@@ -376,6 +439,7 @@ fn relay(
     route: &Route,
     upstream: reqwest::Response,
     queue_wait_ms: u64,
+    retries: u32,
     permits: Vec<OwnedSemaphorePermit>,
 ) -> Response {
     let status = upstream.status();
@@ -387,6 +451,7 @@ fn relay(
     }
     headers.insert(HEADER_ROUTE, route.name_header.clone());
     headers.insert(HEADER_QUEUE_WAIT, HeaderValue::from(queue_wait_ms));
+    headers.insert(HEADER_RETRIES, HeaderValue::from(retries));
 
     let stream = upstream.bytes_stream().map(move |chunk| {
         let _held = &permits;
@@ -396,6 +461,18 @@ fn relay(
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+/// `Retry-After` as whole seconds; the HTTP-date form is not understood.
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let seconds = headers
+        .get(header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds))
 }
 
 fn queue_timeout(max_wait: Duration) -> Response {

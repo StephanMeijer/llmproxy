@@ -18,7 +18,10 @@ use axum::{
     Router,
     body::{Body, Bytes, to_bytes},
     extract::{Request, State},
-    http::header::CONTENT_TYPE,
+    http::{
+        StatusCode,
+        header::{CONTENT_TYPE, RETRY_AFTER},
+    },
     response::{IntoResponse, Response},
 };
 use futures_util::stream;
@@ -36,6 +39,9 @@ use tokio::{
 const TOKEN: &str = "proxy-token";
 const UPSTREAM_KEY: &str = "upstream-key";
 const STREAM_PATH: &str = "/v1/stream";
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(20);
+const LIMITED_PATH: &str = "/v1/limited";
+const UPSTREAM_LIMITED_BODY: &str = r#"{"error":"upstream-rate-limited"}"#;
 
 type Chunks = mpsc::Receiver<Result<Bytes, Infallible>>;
 
@@ -43,11 +49,37 @@ type Chunks = mpsc::Receiver<Result<Bytes, Infallible>>;
 struct Upstream {
     hits: AtomicUsize,
     stream: Mutex<Option<Chunks>>,
+    /// How many calls `/v1/limited` has had.
+    limited: AtomicUsize,
 }
 
-/// Echoes what it received as JSON; `/v1/stream` instead relays chunks the test feeds in.
+/// The number after `name=` in a query string, 0 if absent.
+fn query_number(query: &str, name: &str) -> usize {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('=')?.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Echoes what it received as JSON; `/v1/stream` instead relays chunks the test feeds in, and
+/// `/v1/limited?fail=N&after=S` answers 429 with `Retry-After: S` for its first `N` calls.
 async fn upstream_handler(State(up): State<Arc<Upstream>>, req: Request) -> Response {
     up.hits.fetch_add(1, Ordering::SeqCst);
+    if req.uri().path() == LIMITED_PATH {
+        let query = req.uri().query().unwrap_or_default();
+        let (fail, after) = (query_number(query, "fail"), query_number(query, "after"));
+        if up.limited.fetch_add(1, Ordering::SeqCst) < fail {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [
+                    (RETRY_AFTER, after.to_string()),
+                    (CONTENT_TYPE, "application/json".to_owned()),
+                ],
+                UPSTREAM_LIMITED_BODY,
+            )
+                .into_response();
+        }
+    }
     if req.uri().path() == STREAM_PATH {
         let mut rx = up.stream.lock().unwrap().take().unwrap();
         let chunks = stream::poll_fn(move |cx| rx.poll_recv(cx));
@@ -115,6 +147,11 @@ name = "albert"
 upstream = "http://{up_addr}/v1/"
 headers = {{ Authorization = "Bearer {UPSTREAM_KEY}" }}
 
+[[route]]
+name = "plain"
+upstream = "http://{up_addr}/v1"
+retry_429 = false
+
 [[limit]]
 name = "slow"
 model = "slow-model"
@@ -129,7 +166,11 @@ rpm = 1
         addr,
         upstream,
         metrics_base: format!("http://{metrics_addr}"),
-        client: reqwest::Client::new(),
+        // A bug must fail a test, not hang it: nothing here legitimately takes this long.
+        client: reqwest::Client::builder()
+            .timeout(CLIENT_TIMEOUT)
+            .build()
+            .unwrap(),
     }
 }
 
@@ -679,4 +720,114 @@ async fn held_counts_requests_waiting_on_a_limit() {
     second.text().await.unwrap();
     wait_for_gauge(&h, HELD, 0).await;
     wait_for_gauge(&h, IN_FLIGHT, 0).await;
+}
+
+#[tokio::test]
+async fn an_upstream_429_is_retried_and_the_client_sees_the_success() {
+    let h = start_with("5s", "").await; // a 1 s Retry-After must fit in the budget
+    let sent = r#"{"hello":"world"}"#;
+    let started = Instant::now();
+    let response = h
+        .post("/minimax/limited?fail=1&after=1", sent)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "answered after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(response.headers()["x-proxy-retries"], "1");
+    let seen = echo(response).await;
+    assert_eq!(seen["body"], sent, "the retry must resend the same body");
+    assert_eq!(h.hits(), 2);
+}
+
+#[tokio::test]
+async fn a_persistent_upstream_429_is_passed_on_within_max_wait() {
+    let h = start_with("3s", "").await;
+    let started = Instant::now();
+    let response = h
+        .post("/minimax/limited?fail=1000&after=1", "{}")
+        .send()
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), 429);
+    // The provider's own Retry-After and body, not the proxy's queue_timeout (whose Retry-After is 3).
+    assert_eq!(response.headers()["retry-after"], "1");
+    let retries: usize = response.headers()["x-proxy-retries"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(retries >= 1, "it should have retried at least once");
+    assert_eq!(response.text().await.unwrap(), UPSTREAM_LIMITED_BODY);
+    assert!(
+        elapsed >= Duration::from_secs(1) && elapsed < Duration::from_millis(3500),
+        "answered after {elapsed:?}"
+    );
+    assert_eq!(h.hits(), retries + 1);
+}
+
+#[tokio::test]
+async fn a_retry_after_beyond_the_budget_is_not_waited_for() {
+    let h = start_with("3s", "").await;
+    let started = Instant::now();
+    let response = h
+        .post("/minimax/limited?fail=1000&after=30", "{}")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "waited {:?} for a 30 s Retry-After",
+        started.elapsed()
+    );
+    assert_eq!(response.status(), 429);
+    assert_eq!(response.headers()["retry-after"], "30");
+    assert_eq!(response.headers()["x-proxy-retries"], "0");
+    assert_eq!(h.hits(), 1);
+}
+
+#[tokio::test]
+async fn a_route_can_turn_upstream_429_retries_off() {
+    // The budget would allow a retry, so only the route's switch is what stops one.
+    let h = start_with("5s", "").await;
+    let started = Instant::now();
+    let response = h
+        .post("/plain/limited?fail=1000&after=1", "{}")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "waited {:?} although retries are off",
+        started.elapsed()
+    );
+    assert_eq!(response.status(), 429);
+    assert_eq!(response.headers()["x-proxy-retries"], "0");
+    assert_eq!(h.hits(), 1);
+}
+
+#[tokio::test]
+async fn the_retry_wait_is_counted_and_cancelled_when_the_client_disconnects() {
+    let h = start_with("30s", "").await;
+    let (client, url) = (
+        h.client.clone(),
+        format!("{}/minimax/limited?fail=1000&after=10", h.base),
+    );
+    let waiting = tokio::spawn(async move { client.get(url).bearer_auth(TOKEN).send().await });
+
+    // Sleeping before its retry, the request is both held and in flight.
+    wait_for_gauge(&h, HELD, 1).await;
+    assert_eq!(gauge(&h, IN_FLIGHT).await, 1);
+    assert_eq!(h.hits(), 1);
+
+    waiting.abort(); // the client goes away
+    // Both fall back long before the 10 s wait would have ended, so the sleep was cancelled.
+    wait_for_gauge(&h, IN_FLIGHT, 0).await;
+    wait_for_gauge(&h, HELD, 0).await;
+    assert_eq!(h.hits(), 1);
 }
