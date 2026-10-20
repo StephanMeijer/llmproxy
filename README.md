@@ -131,10 +131,17 @@ Also by design: one shared token for all clients, and a single process, since li
 
 ## Development
 
+CI ([`ci.yml`](.github/workflows/ci.yml)) runs these on every pull request and every push to `main`, and all must pass:
+
 ```sh
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo llvm-cov --locked --fail-under-lines 99     # also runs the tests
 ```
 
-The integration tests start a fake upstream and the real proxy on ephemeral ports, so they need no network.
+- **Strict clippy.** `pedantic` and `nursery` are denied, as are `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro` and `indexing_slicing` (see `[lints.clippy]` in `Cargo.toml`).
+- **Coverage.** Line coverage must stay at or above 99%. Tests live in `tests/`, which coverage ignores, so the number measures production code only. It needs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install cargo-llvm-cov --locked`) and the `llvm-tools` component, which `rustup toolchain install` in this directory adds.
+- **Toolchain.** Pinned in `rust-toolchain.toml`. Bump it on purpose: a new Rust release can add lints.
+- **Tests need no network.** They run a fake upstream and the real proxy on ephemeral ports, and `tests/cli.rs` runs the real binary (start-up, flags, bind errors, `SIGTERM` and `SIGINT`; Unix only).
+
+If your `CARGO_TARGET_DIR` is shared with other projects, give coverage its own, for example `CARGO_TARGET_DIR=target/cov cargo llvm-cov --locked`. Leftover profile files from other projects make `cargo llvm-cov report` fail.
