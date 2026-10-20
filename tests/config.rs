@@ -48,6 +48,59 @@ fn unset_and_unterminated_references_are_errors() {
     assert!(err.0.contains("unterminated"), "{err}");
 }
 
+/// What `proxy_token = "<value>"` expands to, with `X` set to "val".
+fn expanded(value: &str) -> Result<String, ConfigError> {
+    let text = format!("listen = \"127.0.0.1:0\"\nproxy_token = \"{value}\"\n");
+    Config::parse(&text, |name| (name == "X").then(|| "val".to_owned()))
+        .map(|config| config.proxy_token)
+}
+
+#[test]
+fn a_dollar_dollar_brace_is_a_literal_brace() {
+    for (value, want) in [
+        ("$${X}", "${X}"),
+        ("a$${b", "a${b"), // an escape needs no closing brace
+        ("$${X}${X}", "${X}val"),
+        ("$$${X}", "$${X}"),
+        ("$$$${X}", "$$${X}"),
+    ] {
+        assert_eq!(expanded(value).unwrap(), want, "{value}");
+    }
+}
+
+#[test]
+fn other_dollars_are_left_alone() {
+    for (value, want) in [
+        ("$", "$"),
+        ("$$", "$$"),
+        ("$X", "$X"),
+        ("a$ b", "a$ b"),
+        ("${X}", "val"),
+    ] {
+        assert_eq!(expanded(value).unwrap(), want, "{value}");
+    }
+}
+
+#[test]
+fn references_still_fail_next_to_an_escape() {
+    let err = expanded("$${X}${NOPE}").unwrap_err();
+    assert!(err.0.contains("NOPE is not set"), "{err}");
+    let err = expanded("$${X} ${").unwrap_err();
+    assert!(err.0.contains("unterminated"), "{err}");
+}
+
+#[test]
+fn literal_braces_work_in_header_values() {
+    let text = format!(
+        "{MINIMAL}[[route]]\nname = \"a\"\nupstream = \"http://127.0.0.1:1/v1\"\n\
+         headers = {{ X-Template = \"$${{NOT_A_VAR}}\" }}\n"
+    );
+    let config = Config::parse(&text, lookup).unwrap();
+    let route = config.routes.first().unwrap();
+    assert_eq!(route.headers.get("X-Template").unwrap(), "${NOT_A_VAR}");
+    Proxy::new(config).unwrap();
+}
+
 #[test]
 fn empty_token_is_rejected() {
     let err = Config::parse(MINIMAL, |_| Some(String::new())).unwrap_err();

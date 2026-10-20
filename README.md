@@ -39,7 +39,7 @@ curl http://localhost:8788/minimax/chat/completions \
 
 See [`config.example.toml`](config.example.toml) for a complete, commented file. Unknown keys are rejected, so a typo fails at startup instead of being ignored.
 
-Any string value may contain `${VAR}`, filled in from the environment. An unset variable stops startup, and an empty `proxy_token` is refused.
+Any string value may contain `${VAR}`, filled in from the environment. An unset variable stops startup, and an empty `proxy_token` is refused. To write a literal `${`, write `$${`; a lone `$` or `$$` needs no escape.
 
 ### Top level
 
