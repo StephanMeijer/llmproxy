@@ -85,6 +85,11 @@ async fn serve(app: Router) -> SocketAddr {
 }
 
 async fn start() -> Harness {
+    start_with("1s", "").await
+}
+
+/// `extra_toml` is appended to the config, so it can add more `[[limit]]` tables.
+async fn start_with(max_wait: &str, extra_toml: &str) -> Harness {
     let upstream = Arc::new(Upstream::default());
     let up_addr = serve(
         Router::new()
@@ -96,7 +101,7 @@ async fn start() -> Harness {
         r#"
 listen = "127.0.0.1:0"
 proxy_token = "{TOKEN}"
-max_wait = "1s"
+max_wait = "{max_wait}"
 max_body = 1024
 tool_choice_prefix = "/albert/"
 
@@ -114,7 +119,7 @@ headers = {{ Authorization = "Bearer {UPSTREAM_KEY}" }}
 name = "slow"
 model = "slow-model"
 rpm = 1
-"#
+{extra_toml}"#
     );
     let proxy = Arc::new(Proxy::new(Config::parse(&text, |_| None).unwrap()).unwrap());
     let addr = serve(router(proxy.clone())).await;
@@ -476,4 +481,120 @@ async fn allows_dot_segments_that_stay_inside_the_upstream() {
         .await
         .unwrap();
     assert_eq!(echo(response).await["target"], "/v1/models");
+}
+
+/// Matches both the streaming request and the plain one below.
+const ONE_AT_A_TIME: &str = r#"
+[[limit]]
+name = "one-at-a-time"
+prefixes = ["/minimax/"]
+max_inflight = 1
+"#;
+/// How long a second request must stay held while the first is still streaming.
+const HELD_FOR: Duration = Duration::from_millis(200);
+const PATIENCE: Duration = Duration::from_secs(5);
+
+type Feed = mpsc::Sender<Result<Bytes, Infallible>>;
+
+/// Starts a streaming request that is provably mid-stream (headers and a first chunk delivered),
+/// so it holds its slot. Dropping the returned sender ends the upstream body.
+async fn open_stream(h: &Harness) -> (Feed, reqwest::Response) {
+    let (tx, rx) = mpsc::channel(4);
+    *h.upstream.stream.lock().unwrap() = Some(rx);
+    tx.send(Ok(Bytes::from_static(b"data: one\n\n")))
+        .await
+        .unwrap();
+    let mut response = h
+        .client
+        .get(format!("{}/minimax/stream", h.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(PATIENCE, response.chunk())
+        .await
+        .expect("first chunk was buffered");
+    assert_eq!(first.unwrap().unwrap(), "data: one\n\n");
+    (tx, response)
+}
+
+/// A second request that the one-at-a-time limit also matches, sent in the background so the test
+/// can look at it while it waits.
+fn spawn_second_request(h: &Harness) -> tokio::task::JoinHandle<reqwest::Response> {
+    let (client, url) = (h.client.clone(), format!("{}/minimax/models", h.base));
+    tokio::spawn(async move { client.get(url).bearer_auth(TOKEN).send().await.unwrap() })
+}
+
+#[tokio::test]
+async fn inflight_slot_is_held_until_the_stream_ends() {
+    let h = start_with("5s", ONE_AT_A_TIME).await;
+    let (tx, response) = open_stream(&h).await;
+
+    // The first response already has its headers and a chunk, yet it still owns the only slot.
+    let second = spawn_second_request(&h);
+    tokio::time::sleep(HELD_FOR).await;
+    assert!(
+        !second.is_finished(),
+        "the second request ran while the first was still streaming"
+    );
+    assert_eq!(h.hits(), 1, "the second request reached the upstream");
+
+    drop(tx);
+    assert_eq!(response.text().await.unwrap(), "");
+    let second = tokio::time::timeout(PATIENCE, second)
+        .await
+        .expect("the second request stayed held after the stream ended")
+        .unwrap();
+    assert_eq!(second.status(), 200);
+    assert_eq!(h.hits(), 2);
+}
+
+#[tokio::test]
+async fn inflight_slot_is_released_when_the_client_disconnects_mid_stream() {
+    let h = start_with("5s", ONE_AT_A_TIME).await;
+    let (tx, response) = open_stream(&h).await;
+
+    let second = spawn_second_request(&h);
+    tokio::time::sleep(HELD_FOR).await;
+    assert!(
+        !second.is_finished(),
+        "the second request was not held, so this test would prove nothing"
+    );
+
+    drop(response); // the client goes away mid-stream
+    // Give the proxy a write to fail on in case it only notices on its next write. Once it has
+    // noticed, the send fails because the upstream body is gone, which is fine.
+    tx.send(Ok(Bytes::from_static(b"data: two\n\n"))).await.ok();
+    let second = tokio::time::timeout(PATIENCE, second)
+        .await
+        .expect("the slot leaked after the client disconnected")
+        .unwrap();
+    assert_eq!(second.status(), 200);
+}
+
+#[tokio::test]
+async fn a_request_held_on_inflight_past_max_wait_gets_429_and_sends_nothing_upstream() {
+    let h = start_with("1s", ONE_AT_A_TIME).await;
+    let (tx, response) = open_stream(&h).await;
+
+    let started = Instant::now();
+    let second = h
+        .client
+        .get(format!("{}/minimax/models", h.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "answered after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(second.status(), 429);
+    assert_eq!(second.headers()["retry-after"], "1");
+    assert_eq!(json_body(second).await["error"]["type"], "queue_timeout");
+    assert_eq!(h.hits(), 1, "a held request must send nothing upstream");
+
+    drop(tx);
+    assert_eq!(response.text().await.unwrap(), "");
 }
