@@ -117,9 +117,12 @@ When `metrics_listen` is set, `GET /metrics` serves:
 ```
 llm3_http_requests_total{route,code}   counter
 llm3_http_requests_in_flight           gauge
+llm3_http_requests_held                gauge
 ```
 
-`route` is a configured route name, `healthz`, or `other` (rejected before routing). The gauge counts a request from arrival until response headers are ready, including time held on a limit.
+`route` is a configured route name, `healthz`, or `other` (rejected before routing).
+
+`llm3_http_requests_in_flight` counts a request from arrival until its response body ends, so a long stream stays counted for as long as it runs, and one the client abandons stops being counted. `llm3_http_requests_held` counts only the requests currently waiting on a limit. Alert on a backlog with `held`, not `in_flight`, which also includes healthy long streams.
 
 On `SIGTERM` or `SIGINT` the proxy stops accepting and lets in-flight and held requests finish.
 
