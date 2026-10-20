@@ -1,4 +1,5 @@
 # Every string value may contain ${VAR}; an unset variable stops startup.
+# Write $${ for a literal ${ (a lone $ or $$ needs no escape).
 # `llmproxy --check-config [path]` validates this file without serving.
 
 listen = "0.0.0.0:8788"

@@ -109,7 +109,7 @@ impl Config {
         Self::parse(&text, |name| env::var(name).ok())
     }
 
-    /// Parses `text`; `lookup` resolves `${VAR}` references.
+    /// Parses `text`; `lookup` resolves `${VAR}` references, and `$${` is a literal `${`.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] for invalid TOML, unknown keys, an unresolved or unterminated
@@ -148,6 +148,15 @@ fn expand(template: &str, lookup: &impl Fn(&str) -> Option<String>) -> Result<St
     let mut out = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("${") {
+        // "$${" is an escape for a literal "${": it looks nothing up and needs no closing brace.
+        // shortcut: a "$" directly before a reference cannot be written, so a lone "$" or "$$" keeps
+        // working as before; upgrade by making "$$" mean "$" everywhere, which breaks values with "$$".
+        if let Some(before) = rest[..start].strip_suffix('$') {
+            out.push_str(before);
+            out.push_str("${");
+            rest = &rest[start + 2..];
+            continue;
+        }
         out.push_str(&rest[..start]);
         let tail = &rest[start + 2..];
         let end = tail
