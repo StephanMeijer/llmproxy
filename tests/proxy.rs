@@ -291,6 +291,7 @@ async fn adds_tool_choice_only_when_tools_are_offered_without_one() {
             r#"{"model":"m"}"#,
         ),
         ("/albert/chat/completions", "not json", "not json"),
+        ("/albert/chat/completions", "[1,2]", "[1,2]"), // valid JSON, but not an object
         ("/albert/embeddings", tools, tools),
         ("/minimax/chat/completions", tools, tools),
     ];
