@@ -11,7 +11,7 @@ use std::{
 
 use axum::{
     Router,
-    body::{Body, Bytes, to_bytes},
+    body::{Body, Bytes, HttpBody, to_bytes},
     extract::{Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
@@ -117,10 +117,13 @@ impl Route {
     }
 }
 
-/// Request counters and the in-flight gauge, rendered as Prometheus text.
+/// Request counters and two gauges, rendered as Prometheus text.
 #[derive(Default)]
 pub struct Metrics {
-    in_flight: AtomicI64,
+    /// Requests from arrival until their response body ends.
+    in_flight: Arc<AtomicI64>,
+    /// Requests currently waiting on a limit.
+    held: Arc<AtomicI64>,
     requests: Mutex<BTreeMap<(String, u16), u64>>,
 }
 
@@ -142,24 +145,30 @@ impl Metrics {
                 .concat()
         };
         format!(
-            "# TYPE llm3_http_requests_total counter\n{rows}\
-             # TYPE llm3_http_requests_in_flight gauge\nllm3_http_requests_in_flight {}\n",
-            self.in_flight.load(Ordering::Relaxed)
+            "# HELP llm3_http_requests_total Requests by route and status code.\n\
+             # TYPE llm3_http_requests_total counter\n{rows}\
+             # HELP llm3_http_requests_in_flight Requests from arrival until their response body ends.\n\
+             # TYPE llm3_http_requests_in_flight gauge\nllm3_http_requests_in_flight {}\n\
+             # HELP llm3_http_requests_held Requests currently waiting on a limit.\n\
+             # TYPE llm3_http_requests_held gauge\nllm3_http_requests_held {}\n",
+            self.in_flight.load(Ordering::Relaxed),
+            self.held.load(Ordering::Relaxed)
         )
     }
 }
 
-/// Counts a request as in flight for as long as its handler future lives, including when dropped.
-struct InFlight<'a>(&'a AtomicI64);
+/// Counts one request on a gauge for as long as it lives, including when the owning future is
+/// dropped. It owns an `Arc` so it can ride inside a `'static` response body.
+struct Counted(Arc<AtomicI64>);
 
-impl<'a> InFlight<'a> {
-    fn new(counter: &'a AtomicI64) -> Self {
-        counter.fetch_add(1, Ordering::Relaxed);
-        Self(counter)
+impl Counted {
+    fn new(gauge: &Arc<AtomicI64>) -> Self {
+        gauge.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(gauge))
     }
 }
 
-impl Drop for InFlight<'_> {
+impl Drop for Counted {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
@@ -272,9 +281,11 @@ impl Proxy {
             model.as_deref(),
             body.len() / BYTES_PER_TOKEN,
         );
+        let waiting = Counted::new(&self.metrics.held);
         let Ok(permits) = timeout(self.max_wait, held).await else {
             return queue_timeout(self.max_wait);
         };
+        drop(waiting);
         let queue_wait_ms = millis(queued.elapsed());
 
         let Some(url) = upstream_url(route, rest, parts.uri.query()) else {
@@ -438,12 +449,27 @@ fn error(status: StatusCode, kind: &str, message: &str) -> Response {
 async fn handle(State(proxy): State<Arc<Proxy>>, req: Request) -> Response {
     let started = Instant::now();
     let (method, path) = (req.method().clone(), req.uri().path().to_owned());
-    let _in_flight = InFlight::new(&proxy.metrics.in_flight);
+    let in_flight = Counted::new(&proxy.metrics.in_flight);
     let (route, response) = proxy.serve(req).await;
     let status = response.status().as_u16();
     proxy.metrics.record(route, status);
     tracing::info!(route, status, %method, path, ms = millis(started.elapsed()), "request");
-    response
+    count_until_body_ends(response, in_flight)
+}
+
+/// A streamed body (an upstream relay) keeps the request counted until the stream is dropped, which
+/// is when it ends or the client leaves. Bodies of a known size, the proxy's own small replies, are
+/// done by now, and are returned untouched so their framing does not change.
+fn count_until_body_ends(response: Response, counted: Counted) -> Response {
+    if response.body().size_hint().exact().is_some() {
+        return response;
+    }
+    response.map(|body| {
+        Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let _counted = &counted;
+            chunk
+        }))
+    })
 }
 
 /// The client-facing app. Everything is a fallback so routes stay data, not code.

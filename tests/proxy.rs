@@ -468,6 +468,7 @@ async fn exposes_request_counters() {
         "{text}"
     );
     assert!(text.contains("llm3_http_requests_in_flight 0"), "{text}");
+    assert!(text.contains("llm3_http_requests_held 0"), "{text}");
 }
 
 #[tokio::test]
@@ -597,4 +598,85 @@ async fn a_request_held_on_inflight_past_max_wait_gets_429_and_sends_nothing_ups
 
     drop(tx);
     assert_eq!(response.text().await.unwrap(), "");
+}
+
+const IN_FLIGHT: &str = "llm3_http_requests_in_flight";
+const HELD: &str = "llm3_http_requests_held";
+const GAUGE_POLL: Duration = Duration::from_millis(20);
+
+/// Reads one gauge from the metrics endpoint.
+async fn gauge(h: &Harness, name: &str) -> i64 {
+    let text = h
+        .client
+        .get(format!("{}/metrics", h.metrics_base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let value = text
+        .lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '));
+    assert!(value.is_some(), "{name} is not exposed:\n{text}");
+    value.unwrap().parse().unwrap()
+}
+
+/// A gauge falls a moment after the client sees the end of a body, so poll instead of reading once.
+async fn wait_for_gauge(h: &Harness, name: &str, want: i64) {
+    let deadline = Instant::now() + PATIENCE;
+    let mut seen = gauge(h, name).await;
+    while seen != want && Instant::now() < deadline {
+        tokio::time::sleep(GAUGE_POLL).await;
+        seen = gauge(h, name).await;
+    }
+    assert_eq!(seen, want, "{name} never reached {want}");
+}
+
+#[tokio::test]
+async fn in_flight_counts_a_streaming_request_until_its_body_ends() {
+    let h = start().await;
+    let (tx, response) = open_stream(&h).await;
+
+    // Headers and a chunk are already out, which is where the gauge used to fall back to 0.
+    assert_eq!(gauge(&h, IN_FLIGHT).await, 1);
+    assert_eq!(gauge(&h, HELD).await, 0);
+
+    drop(tx);
+    assert_eq!(response.text().await.unwrap(), "");
+    wait_for_gauge(&h, IN_FLIGHT, 0).await;
+}
+
+#[tokio::test]
+async fn in_flight_returns_to_zero_when_the_client_disconnects_mid_stream() {
+    let h = start().await;
+    let (tx, response) = open_stream(&h).await;
+    assert_eq!(gauge(&h, IN_FLIGHT).await, 1);
+
+    drop(response); // the client goes away mid-stream
+    // Give the proxy a write to fail on in case it only notices on its next write.
+    tx.send(Ok(Bytes::from_static(b"data: two\n\n"))).await.ok();
+    wait_for_gauge(&h, IN_FLIGHT, 0).await;
+}
+
+#[tokio::test]
+async fn held_counts_requests_waiting_on_a_limit() {
+    let h = start_with("5s", ONE_AT_A_TIME).await;
+    let (tx, response) = open_stream(&h).await;
+    assert_eq!(gauge(&h, HELD).await, 0);
+
+    let second = spawn_second_request(&h);
+    wait_for_gauge(&h, HELD, 1).await;
+    assert_eq!(gauge(&h, IN_FLIGHT).await, 2);
+
+    drop(tx);
+    assert_eq!(response.text().await.unwrap(), "");
+    let second = tokio::time::timeout(PATIENCE, second)
+        .await
+        .expect("the second request stayed held after the stream ended")
+        .unwrap();
+    assert_eq!(second.status(), 200);
+    second.text().await.unwrap();
+    wait_for_gauge(&h, HELD, 0).await;
+    wait_for_gauge(&h, IN_FLIGHT, 0).await;
 }
