@@ -1,0 +1,61 @@
+# Every string value may contain ${VAR}; an unset variable stops startup.
+# `llmproxy --check-config [path]` validates this file without serving.
+
+listen = "0.0.0.0:8788"
+metrics_listen = "0.0.0.0:9180"           # optional; omit to serve no metrics
+proxy_token = "${PROXY_TOKEN}"            # sent by clients as `Authorization: Bearer` or `x-api-key`
+max_wait = "120s"                         # a request held longer by a limit gets 429
+connect_timeout = "10s"                   # upstream dial only; response reads are never cut
+max_body = 16777216                       # bytes; larger request bodies get 413
+tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" when tools are sent without one
+
+# `/<name>/<rest>` is forwarded to `<upstream>/<rest>`. The client's Authorization and
+# x-api-key are always dropped; `headers` sets the provider credential ("" removes a header).
+
+[[route]]
+name = "minimax"
+upstream = "https://api.minimax.io/v1"
+headers = { Authorization = "Bearer ${MINIMAX_API_KEY}", X-Api-Key = "" }
+
+[[route]]
+name = "minimax-anthropic"
+upstream = "https://api.minimax.io/anthropic"
+headers = { Authorization = "Bearer ${MINIMAX_API_KEY}", X-Api-Key = "${MINIMAX_API_KEY}" }
+
+[[route]]
+name = "albert"
+upstream = "https://albert.api.etalab.gouv.fr/v1"
+headers = { Authorization = "Bearer ${ALBERT_API_KEY}", X-Api-Key = "" }
+
+[[route]]
+name = "openrouter"
+upstream = "https://openrouter.ai/api/v1"
+headers = { Authorization = "Bearer ${OPENROUTER_API_KEY}", X-Api-Key = "", HTTP-Referer = "https://llm.example.org", X-Title = "llmproxy" }
+
+[[route]]
+name = "opencode"
+upstream = "https://opencode.ai/zen/v1"
+headers = { Authorization = "Bearer ${OPENCODE_API_KEY}", X-Api-Key = "" }
+
+# Limits hold requests (FIFO) until budget frees. A request may match several limits.
+# Tokens are estimated as body bytes / 4. `max_inflight` caps concurrency instead of rate.
+
+[[limit]]
+name = "deepseek"
+model = "deepseek-v4-flash-0731"
+rpm = 45
+burst = 5
+tpm = 200000
+tpm_burst = 40000
+
+[[limit]]
+name = "gpt-oss"
+model = "openai/gpt-oss-120b"
+rpm = 1000
+burst = 20
+
+[[limit]]
+name = "minimax"
+prefixes = ["/minimax/", "/minimax-anthropic/"]
+rpm = 85
+burst = 10
