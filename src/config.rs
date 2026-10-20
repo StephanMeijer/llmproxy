@@ -51,6 +51,10 @@ pub struct RouteConfig {
     /// Set on every forwarded request; an empty value removes the header.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// Hold and retry an upstream `429` until `max_wait` runs out. Turn it off where a 429 means the
+    /// quota is spent, because retrying then only delays the same answer.
+    #[serde(default = "default_retry_429")]
+    pub retry_429: bool,
 }
 
 /// Matches on `model` (JSON body) and/or `prefixes` (request path); both must hold when both are set.
@@ -79,6 +83,10 @@ const fn default_max_wait() -> Duration {
 
 const fn default_connect_timeout() -> Duration {
     DEFAULT_CONNECT_TIMEOUT
+}
+
+const fn default_retry_429() -> bool {
+    true
 }
 
 const fn default_max_body() -> usize {

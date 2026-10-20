@@ -60,6 +60,7 @@ Any string value may contain `${VAR}`, filled in from the environment. An unset 
 | `name` | Path prefix `/<name>/`. Letters, digits, `-` and `_` only; must be unique. |
 | `upstream` | `http(s)` base URL the rest of the path is appended to. |
 | `headers` | Headers set on every forwarded request. An empty value removes the header. |
+| `retry_429` | Default `true`. Hold and retry an upstream `429` until `max_wait` runs out. Set `false` where a `429` means the quota is spent, because retrying then only delays the same answer. |
 
 ### `[[limit]]`
 
@@ -84,6 +85,8 @@ A limit needs a matcher and at least one of `rpm`, `tpm`, `max_inflight`.
 
 **Holding.** Held requests queue first-in-first-out. A request that gives up or times out while waiting on a limit takes nothing from that limit, and nothing is sent upstream. With several matching limits, budget already taken from an earlier one is not given back.
 
+**Upstream 429s.** When the provider answers `429` and the route has `retry_429` on, the proxy waits and sends the same request again instead of passing the error on. It waits for the provider's `Retry-After` (whole seconds) or, without one, 1 s doubling up to 10 s, and never less than 250 ms. Waiting shares the `max_wait` budget with the time spent held on limits. When the next wait would not fit in what is left, the latest `429` is returned as it came from the provider, with its own `Retry-After` and body, so a client is never held for nothing. Retries are cancelled if the client disconnects. A `Retry-After` given as a date is ignored, and a retry does not draw on the local `rpm` / `tpm` budget again.
+
 ### `tool_choice` shim
 
 With `tool_choice_prefix = "/albert/"`, a `POST` to `/albert/.../chat/completions` whose JSON body has a non-empty `tools` array and no `tool_choice` key gets `"tool_choice": "auto"` added at the end. Everything else is forwarded byte for byte: other paths, non-JSON bodies, empty `tools`, and any present `tool_choice` (even `null`). Key order is preserved.
@@ -96,6 +99,7 @@ Provider responses are passed through with their status and headers, plus:
 |---|---|
 | `X-Proxy-Route` | Name of the route that served the request. |
 | `X-Proxy-Queue-Wait-Ms` | Time spent held on limits. |
+| `X-Proxy-Retries` | How many times the request was resent after an upstream `429` (`0` if never). |
 
 Errors the proxy produces itself are JSON: `{"error": {"type": "...", "message": "..."}}`.
 
@@ -122,13 +126,13 @@ llm3_http_requests_held                gauge
 
 `route` is a configured route name, `healthz`, or `other` (rejected before routing).
 
-`llm3_http_requests_in_flight` counts a request from arrival until its response body ends, so a long stream stays counted for as long as it runs, and one the client abandons stops being counted. `llm3_http_requests_held` counts only the requests currently waiting on a limit. Alert on a backlog with `held`, not `in_flight`, which also includes healthy long streams.
+`llm3_http_requests_in_flight` counts a request from arrival until its response body ends, so a long stream stays counted for as long as it runs, and one the client abandons stops being counted. `llm3_http_requests_held` counts only the requests currently waiting on a limit, whether ours or the provider's (waiting to retry after an upstream `429`). Alert on a backlog with `held`, not `in_flight`, which also includes healthy long streams.
 
 On `SIGTERM` or `SIGINT` the proxy stops accepting and lets in-flight and held requests finish.
 
 ## Not yet implemented
 
-Tracked as issues: a zero-cost model pool ([#1](https://github.com/StephanMeijer/llmproxy/issues/1)), a Claude subscription adapter ([#2](https://github.com/StephanMeijer/llmproxy/issues/2)), retrying upstream `429`s ([#3](https://github.com/StephanMeijer/llmproxy/issues/3)), a duration histogram ([#4](https://github.com/StephanMeijer/llmproxy/issues/4)), and smaller items ([#5](https://github.com/StephanMeijer/llmproxy/issues/5), [#6](https://github.com/StephanMeijer/llmproxy/issues/6), [#7](https://github.com/StephanMeijer/llmproxy/issues/7)).
+Tracked as issues: a zero-cost model pool ([#1](https://github.com/StephanMeijer/llmproxy/issues/1)), a Claude subscription adapter ([#2](https://github.com/StephanMeijer/llmproxy/issues/2)), and a request duration histogram ([#4](https://github.com/StephanMeijer/llmproxy/issues/4)).
 
 Also by design: one shared token for all clients, and a single process, since limit state is held in memory.
 
