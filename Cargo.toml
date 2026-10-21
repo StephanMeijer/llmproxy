@@ -5,6 +5,14 @@ edition = "2024"
 description = "Authenticated, rate-limited, fully configurable egress proxy for LLM provider APIs"
 
 [dependencies]
+aes-gcm = { version = "=0.11.1", features = ["zeroize"] }
+argon2 = { version = "=0.6.0", features = ["zeroize"] }
+getrandom = { version = "=0.4.3", features = ["std"] }
+hmac = { version = "=0.13.0", features = ["zeroize"] }
+sha2 = { version = "=0.11.1", features = ["zeroize"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "macros", "uuid", "json"] }
+uuid = { version = "=1.28.0", features = ["v4", "serde"] }
+zeroize = { version = "=1.9.1", features = ["derive"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 futures-util = "0.3.34"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
