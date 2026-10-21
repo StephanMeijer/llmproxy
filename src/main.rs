@@ -11,6 +11,7 @@ const CONFIG_ENV: &str = "LLMPROXY_CONFIG";
 const DEFAULT_CONFIG: &str = "/etc/llmproxy/config.toml";
 const CHECK_FLAG: &str = "--check-config";
 
+mod help;
 mod operator;
 
 #[tokio::main]
@@ -26,6 +27,10 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if matches!(args.as_slice(), [flag] if flag == "--help" || flag == "-h") {
+        print!("{}", help::USAGE);
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "auth") {
         return operator::run(&args).await;
     }
@@ -35,11 +40,15 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     if args.first().is_some_and(|arg| arg == "credentials") {
         return reencrypt(&args).await;
     }
-    let check_only = args.iter().any(|a| a == CHECK_FLAG);
-    let path = args
-        .iter()
-        .find(|a| !a.starts_with("--"))
-        .cloned()
+    let (check_only, path) = match args.as_slice() {
+        [] => (false, None),
+        [flag] if flag == CHECK_FLAG => (true, None),
+        [path] if !path.starts_with('-') => (false, Some(path.clone())),
+        [flag, path] if flag == CHECK_FLAG && !path.starts_with('-') => (true, Some(path.clone())),
+        [path, flag] if flag == CHECK_FLAG && !path.starts_with('-') => (true, Some(path.clone())),
+        _ => return Err("invalid arguments; use llmproxy --help".into()),
+    };
+    let path = path
         .or_else(|| env::var(CONFIG_ENV).ok())
         .unwrap_or_else(|| DEFAULT_CONFIG.to_owned());
 
