@@ -103,15 +103,18 @@ async fn failed_migration_rolls_back_all_its_ddl() {
 
 #[tokio::test]
 async fn migration_permission_failure_is_sanitized_and_transactional() {
+    const PASSWORD: &str = "redaction-sentinel";
     let db = Database::new().await;
     let role = format!("limited_{}", Uuid::new_v4().simple());
-    sqlx::query(AssertSqlSafe(format!("CREATE ROLE {role} LOGIN")))
-        .execute(&db.admin)
-        .await
-        .unwrap();
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD '{PASSWORD}'"
+    )))
+    .execute(&db.admin)
+    .await
+    .unwrap();
     let mut url = reqwest::Url::parse(&db.config.url).unwrap();
     url.set_username(&role).unwrap();
-    url.set_password(Some("redaction-sentinel")).unwrap();
+    url.set_password(Some(PASSWORD)).unwrap();
     fs::write(&db.path, format!("listen = '127.0.0.1:0'\nproxy_token = 'test'\n[postgres]\nurl = '{url}'\nnamespace = 'test'\n")).unwrap();
     let output = Command::new(BIN)
         .args(["db", "migrate"])
@@ -121,7 +124,7 @@ async fn migration_permission_failure_is_sanitized_and_transactional() {
     assert_eq!(output.status.code(), Some(1));
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("migration privileges"), "{error}");
-    assert!(!error.contains("redaction-sentinel"));
+    assert!(!error.contains(PASSWORD));
     assert!(!error.contains(url.as_str()));
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('people') IS NOT NULL")
         .fetch_one(&db.pool)
