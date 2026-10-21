@@ -8,6 +8,8 @@ mod outage;
 mod repositories;
 #[path = "storage/runtime.rs"]
 mod runtime;
+#[path = "storage/shared_listener.rs"]
+mod shared_listener;
 
 use llmproxy::{
     config::Config,

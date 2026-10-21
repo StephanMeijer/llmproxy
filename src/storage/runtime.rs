@@ -13,10 +13,12 @@ pub struct Storage {
     pub(super) pool: PgPool,
     pub(super) namespace: String,
     pub(super) timeout: Duration,
+    pub(super) notifications: Arc<super::listener::Notifications>,
 }
 
 impl Storage {
     /// Creates a bounded pool with statement logging disabled.
+    /// A shared notification listener lazily uses one additional connection per runtime.
     /// # Errors
     /// Returns `InvalidData` for invalid settings or connection syntax.
     pub fn new(config: &PostgresConfig) -> Result<Self, StorageError> {
@@ -33,8 +35,12 @@ impl Storage {
             .min_connections(0)
             .max_connections(config.max_connections)
             .acquire_timeout(config.acquire_timeout.min(config.connect_timeout))
-            .connect_lazy_with(options);
+            .connect_lazy_with(options.clone());
         Ok(Self {
+            notifications: Arc::new(super::listener::Notifications::new(
+                options,
+                config.acquire_timeout.min(config.connect_timeout),
+            )),
             metrics: None,
             pool,
             namespace: config.namespace.clone(),
@@ -70,6 +76,7 @@ impl Storage {
 
     /// Closes this runtime's pool and waits for checked-out operations.
     pub async fn close(&self) {
+        self.notifications.close().await;
         self.pool.close().await;
     }
 }

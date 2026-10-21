@@ -41,6 +41,19 @@ impl Drop for Server {
     }
 }
 
+const DATABASE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn assert_connections_released(config: &PostgresConfig) {
+    let observer = sqlx::PgPool::connect(&config.url).await.unwrap();
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()")
+        .fetch_one(&observer).await.unwrap();
+    assert_eq!(
+        remaining, 0,
+        "recovered runtime leaked database connections"
+    );
+    observer.close().await;
+}
+
 #[tokio::test]
 async fn postgres_stop_restart_recovers_same_runtime_and_listener() {
     // Given an explicitly configured test database and a dedicated PostgreSQL 18 container.
@@ -83,7 +96,7 @@ async fn postgres_stop_restart_recovers_same_runtime_and_listener() {
         connect_timeout: SHORT,
         acquire_timeout: SHORT,
     };
-    let deadline = tokio::time::Instant::now() + LONG;
+    let deadline = tokio::time::Instant::now() + DATABASE_STARTUP_TIMEOUT;
     loop {
         if storage::migrate(&config).await.is_ok() {
             break;
@@ -144,6 +157,7 @@ async fn postgres_stop_restart_recovers_same_runtime_and_listener() {
     }
     drop(listener);
     store.close().await;
+    assert_connections_released(&config).await;
 }
 
 #[tokio::test]
