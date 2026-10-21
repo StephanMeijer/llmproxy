@@ -119,20 +119,24 @@ Logs are JSON on stdout at `INFO`, one line per request: route, status, method, 
 When `metrics_listen` is set, `GET /metrics` serves:
 
 ```
-llm3_http_requests_total{route,code}   counter
-llm3_http_requests_in_flight           gauge
-llm3_http_requests_held                gauge
+llm3_http_requests_total{route,code}              counter
+llm3_http_requests_in_flight                      gauge
+llm3_http_requests_held                           gauge
+llm3_http_request_header_duration_seconds{route}  histogram
+llm3_http_request_duration_seconds{route}         histogram
 ```
 
 `route` is a configured route name, `healthz`, or `other` (rejected before routing).
 
 `llm3_http_requests_in_flight` counts a request from arrival until its response body ends, so a long stream stays counted for as long as it runs, and one the client abandons stops being counted. `llm3_http_requests_held` counts only the requests currently waiting on a limit, whether ours or the provider's (waiting to retry after an upstream `429`). Alert on a backlog with `held`, not `in_flight`, which also includes healthy long streams.
 
+Both histograms start the clock when the request arrives. `llm3_http_request_header_duration_seconds` stops it when the response headers are ready, so it covers time spent held on a limit, upstream retries and the upstream's time to respond; alert on a slowdown with this one. `llm3_http_request_duration_seconds` stops it when the response body ends, so a long stream lands in a high bucket however healthy it is, and a client that leaves mid-stream records the time until it left. A request the client abandons before the headers are ready is not observed, as with the counters. The buckets are fixed: 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 and 300 seconds.
+
 On `SIGTERM` or `SIGINT` the proxy stops accepting and lets in-flight and held requests finish.
 
 ## Not yet implemented
 
-Tracked as issues: a zero-cost model pool ([#1](https://github.com/StephanMeijer/llmproxy/issues/1)), a Claude subscription adapter ([#2](https://github.com/StephanMeijer/llmproxy/issues/2)), and a request duration histogram ([#4](https://github.com/StephanMeijer/llmproxy/issues/4)).
+Tracked as issues: a zero-cost model pool ([#1](https://github.com/StephanMeijer/llmproxy/issues/1)) and a Claude subscription adapter ([#2](https://github.com/StephanMeijer/llmproxy/issues/2)).
 
 Also by design: one shared token for all clients, and a single process, since limit state is held in memory.
 

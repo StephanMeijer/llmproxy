@@ -722,6 +722,64 @@ async fn held_counts_requests_waiting_on_a_limit() {
     wait_for_gauge(&h, IN_FLIGHT, 0).await;
 }
 
+const TO_END: &str = "llm3_http_request_duration_seconds";
+const TO_HEADERS: &str = "llm3_http_request_header_duration_seconds";
+/// Long enough to land past the 0.5 s bucket with room for a slow machine.
+const SLOW_FOR: Duration = Duration::from_millis(750);
+
+#[tokio::test]
+async fn duration_histograms_separate_fast_and_held_requests() {
+    let h = start_with("5s", ONE_AT_A_TIME).await;
+    // C: fast.
+    h.client
+        .get(format!("{}/minimax/models", h.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // A: its headers come at once, but it streams until we say so. B: held on A's slot.
+    let (tx, response) = open_stream(&h).await;
+    let second = spawn_second_request(&h);
+    tokio::time::sleep(SLOW_FOR).await;
+    drop(tx);
+    assert_eq!(response.text().await.unwrap(), "");
+    let second = tokio::time::timeout(PATIENCE, second)
+        .await
+        .expect("the second request stayed held after the stream ended")
+        .unwrap();
+    second.text().await.unwrap();
+
+    // Only C is fast to the end; C and A are fast to the headers, while B's headers waited on the slot.
+    for (name, fast) in [(TO_END, 1), (TO_HEADERS, 2)] {
+        let bucket = |le: &str| format!(r#"{name}_bucket{{route="minimax",le="{le}"}}"#);
+        wait_for_gauge(&h, &format!(r#"{name}_count{{route="minimax"}}"#), 3).await;
+        assert_eq!(gauge(&h, &bucket("0.5")).await, fast, "{name} le=0.5");
+        assert_eq!(gauge(&h, &bucket("+Inf")).await, 3, "{name} le=+Inf");
+    }
+    let text = h
+        .client
+        .get(format!("{}/metrics", h.metrics_base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for name in [TO_END, TO_HEADERS] {
+        assert!(
+            text.contains(&format!("# TYPE {name} histogram\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(r#"{name}_sum{{route="minimax"}} "#)),
+            "{text}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_upstream_429_is_retried_and_the_client_sees_the_success() {
     let h = start_with("5s", "").await; // a 1 s Retry-After must fit in the budget

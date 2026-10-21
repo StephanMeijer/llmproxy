@@ -72,6 +72,24 @@ const NOT_FORWARDED: [&str; 6] = [
 ];
 const X_FORWARDED_PREFIX: &str = "x-forwarded-";
 
+/// Upper bounds of the duration histograms, from quick replies to long generations.
+///
+/// shortcut: fixed, not configurable; upgrade if a deployment needs other boundaries.
+const BUCKETS: [Duration; 12] = [
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_millis(2500),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_mins(1),
+    Duration::from_mins(2),
+    Duration::from_mins(5),
+];
+
 struct Route {
     name: String,
     name_header: HeaderValue,
@@ -137,7 +155,70 @@ impl Route {
     }
 }
 
-/// Request counters and two gauges, rendered as Prometheus text.
+const DURATION_METRIC: &str = "llm3_http_request_duration_seconds";
+const HEADER_DURATION_METRIC: &str = "llm3_http_request_header_duration_seconds";
+
+/// One Prometheus histogram series. Each bucket counts the observations at or below its bound.
+#[derive(Default)]
+struct Histogram {
+    le: [u64; BUCKETS.len()],
+    count: u64,
+    sum: Duration,
+}
+
+impl Histogram {
+    fn observe(&mut self, elapsed: Duration) {
+        for (n, bound) in self.le.iter_mut().zip(BUCKETS) {
+            if elapsed <= bound {
+                *n += 1;
+            }
+        }
+        self.count += 1;
+        self.sum += elapsed;
+    }
+
+    fn render(&self, name: &str, route: &str) -> String {
+        let buckets = self
+            .le
+            .iter()
+            .zip(BUCKETS)
+            .map(|(n, bound)| {
+                let bound = bound.as_secs_f64();
+                format!("{name}_bucket{{route=\"{route}\",le=\"{bound}\"}} {n}\n")
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        let (count, sum) = (self.count, self.sum.as_secs_f64());
+        format!(
+            "{buckets}{name}_bucket{{route=\"{route}\",le=\"+Inf\"}} {count}\n\
+             {name}_sum{{route=\"{route}\"}} {sum}\n\
+             {name}_count{{route=\"{route}\"}} {count}\n"
+        )
+    }
+}
+
+type Durations = Mutex<BTreeMap<String, Histogram>>;
+
+fn observe(durations: &Durations, route: &str, elapsed: Duration) {
+    let mut durations = durations.lock().unwrap_or_else(PoisonError::into_inner);
+    durations
+        .entry(route.to_owned())
+        .or_default()
+        .observe(elapsed);
+}
+
+fn render_durations(name: &str, help: &str, durations: &Durations) -> String {
+    let rows = {
+        let durations = durations.lock().unwrap_or_else(PoisonError::into_inner);
+        durations
+            .iter()
+            .map(|(route, histogram)| histogram.render(name, route))
+            .collect::<String>()
+    };
+    format!("# HELP {name} {help}\n# TYPE {name} histogram\n{rows}")
+}
+
+/// Request counters, two gauges and two duration histograms, rendered as Prometheus text.
 #[derive(Default)]
 pub struct Metrics {
     /// Requests from arrival until their response body ends.
@@ -145,12 +226,24 @@ pub struct Metrics {
     /// Requests currently waiting on a limit.
     held: Arc<AtomicI64>,
     requests: Mutex<BTreeMap<(String, u16), u64>>,
+    /// Seconds from arrival until the response headers are ready, by route.
+    to_headers: Durations,
+    /// Seconds from arrival until the response body ends, by route.
+    to_end: Durations,
 }
 
 impl Metrics {
     fn record(&self, route: &str, code: u16) {
         let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         *requests.entry((route.to_owned(), code)).or_default() += 1;
+    }
+
+    fn observe_headers(&self, route: &str, elapsed: Duration) {
+        observe(&self.to_headers, route, elapsed);
+    }
+
+    fn observe_end(&self, route: &str, elapsed: Duration) {
+        observe(&self.to_end, route, elapsed);
     }
 
     pub fn render(&self) -> String {
@@ -164,13 +257,24 @@ impl Metrics {
                 .collect::<Vec<_>>()
                 .concat()
         };
+        let headers = render_durations(
+            HEADER_DURATION_METRIC,
+            "Seconds from arrival until the response headers are ready.",
+            &self.to_headers,
+        );
+        let end = render_durations(
+            DURATION_METRIC,
+            "Seconds from arrival until the response body ends.",
+            &self.to_end,
+        );
         format!(
             "# HELP llm3_http_requests_total Requests by route and status code.\n\
              # TYPE llm3_http_requests_total counter\n{rows}\
              # HELP llm3_http_requests_in_flight Requests from arrival until their response body ends.\n\
              # TYPE llm3_http_requests_in_flight gauge\nllm3_http_requests_in_flight {}\n\
              # HELP llm3_http_requests_held Requests currently waiting on a limit.\n\
-             # TYPE llm3_http_requests_held gauge\nllm3_http_requests_held {}\n",
+             # TYPE llm3_http_requests_held gauge\nllm3_http_requests_held {}\n\
+             {headers}{end}",
             self.in_flight.load(Ordering::Relaxed),
             self.held.load(Ordering::Relaxed)
         )
@@ -191,6 +295,22 @@ impl Counted {
 impl Drop for Counted {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Records how long a request lived when it drops, including when the client leaves mid-stream.
+/// It owns an `Arc` so it can ride inside a `'static` response body, like `Counted`.
+struct Timed {
+    proxy: Arc<Proxy>,
+    route: String,
+    started: Instant,
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        self.proxy
+            .metrics
+            .observe_end(&self.route, self.started.elapsed());
     }
 }
 
@@ -529,21 +649,28 @@ async fn handle(State(proxy): State<Arc<Proxy>>, req: Request) -> Response {
     let in_flight = Counted::new(&proxy.metrics.in_flight);
     let (route, response) = proxy.serve(req).await;
     let status = response.status().as_u16();
+    let to_headers = started.elapsed();
     proxy.metrics.record(route, status);
-    tracing::info!(route, status, %method, path, ms = millis(started.elapsed()), "request");
-    count_until_body_ends(response, in_flight)
+    proxy.metrics.observe_headers(route, to_headers);
+    tracing::info!(route, status, %method, path, ms = millis(to_headers), "request");
+    let timed = Timed {
+        proxy: Arc::clone(&proxy),
+        route: route.to_owned(),
+        started,
+    };
+    count_until_body_ends(response, (in_flight, timed))
 }
 
-/// A streamed body (an upstream relay) keeps the request counted until the stream is dropped, which
-/// is when it ends or the client leaves. Bodies of a known size, the proxy's own small replies, are
+/// A streamed body (an upstream relay) keeps `guard` alive until the stream is dropped, which is
+/// when it ends or the client leaves. Bodies of a known size, the proxy's own small replies, are
 /// done by now, and are returned untouched so their framing does not change.
-fn count_until_body_ends(response: Response, counted: Counted) -> Response {
+fn count_until_body_ends(response: Response, guard: impl Send + 'static) -> Response {
     if response.body().size_hint().exact().is_some() {
         return response;
     }
     response.map(|body| {
         Body::from_stream(body.into_data_stream().map(move |chunk| {
-            let _counted = &counted;
+            let _guard = &guard;
             chunk
         }))
     })
