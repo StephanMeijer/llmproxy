@@ -28,6 +28,7 @@ use tokio::{
 use crate::{
     config::{Config, ConfigError},
     limit::Limits,
+    metrics::CredentialMetrics,
 };
 
 const HEALTH_PATH: &str = "/healthz";
@@ -221,6 +222,7 @@ fn render_durations(name: &str, help: &str, durations: &Durations) -> String {
 /// Request counters, two gauges and two duration histograms, rendered as Prometheus text.
 #[derive(Default)]
 pub struct Metrics {
+    credentials: CredentialMetrics,
     /// Requests from arrival until their response body ends.
     in_flight: Arc<AtomicI64>,
     /// Requests currently waiting on a limit.
@@ -233,6 +235,11 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// Bounded telemetry for database and credential lifecycle owners.
+    pub const fn credentials(&self) -> &CredentialMetrics {
+        &self.credentials
+    }
+
     fn record(&self, route: &str, code: u16) {
         let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         *requests.entry((route.to_owned(), code)).or_default() += 1;
@@ -274,9 +281,10 @@ impl Metrics {
              # TYPE llm3_http_requests_in_flight gauge\nllm3_http_requests_in_flight {}\n\
              # HELP llm3_http_requests_held Requests currently waiting on a limit.\n\
              # TYPE llm3_http_requests_held gauge\nllm3_http_requests_held {}\n\
-             {headers}{end}",
+             {headers}{end}{}",
             self.in_flight.load(Ordering::Relaxed),
-            self.held.load(Ordering::Relaxed)
+            self.held.load(Ordering::Relaxed),
+            self.credentials.render()
         )
     }
 }
@@ -326,6 +334,11 @@ pub struct Proxy {
 }
 
 impl Proxy {
+    /// Shared metrics rendered by this proxy's metrics listener.
+    pub const fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
     /// Validates everything that is not plain syntax: route names, URLs, headers and limits.
     ///
     /// # Errors
