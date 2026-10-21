@@ -87,6 +87,9 @@ async fn killed_stream_owner_is_reclaimed_only_after_database_expiry() {
     assert!(held.chunk().await.unwrap().is_some());
     clients.spawn(f.request(&b, 0).send());
     f.db.count("fifo_waiters", 1).await;
+    // Expiry can occur between the reclaim DELETE and the live-capacity SELECT.
+    sqlx::raw_sql("CREATE FUNCTION cross_expiry() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE remaining double precision; BEGIN SELECT EXTRACT(EPOCH FROM (expires_at-clock_timestamp()))::float8 INTO remaining FROM concurrency_leases ORDER BY expires_at LIMIT 1; IF remaining > 0 AND remaining < 0.75 THEN PERFORM pg_sleep(remaining + 0.01); END IF; RETURN NULL; END $$; CREATE TRIGGER cross_expiry AFTER DELETE ON concurrency_leases FOR EACH STATEMENT EXECUTE FUNCTION cross_expiry();")
+        .execute(&f.db.pool).await.unwrap();
     // When SIGKILL terminates the stream owner without a release transaction.
     a.kill();
     let end = tokio::time::timeout(super::WAIT, held.chunk())
@@ -126,6 +129,21 @@ async fn killed_stream_owner_is_reclaimed_only_after_database_expiry() {
             .await
             .unwrap(),
         "reclaimed"
+    );
+    // A dead owner's already-expired metadata is swept on the next admission.
+    clients.spawn(f.request(&b, 0).send());
+    reply(f.hit().await, StatusCode::OK, "capacity-reused");
+    assert_eq!(
+        clients
+            .join_next()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "capacity-reused"
     );
     f.db.count("concurrency_leases", 0).await;
     f.record(
