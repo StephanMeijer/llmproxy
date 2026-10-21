@@ -4,3 +4,4 @@ pub mod config;
 pub mod limit;
 pub mod proxy;
 pub mod secret;
+pub mod storage;
