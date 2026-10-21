@@ -151,9 +151,9 @@ impl Claude {
         let admission = match admission {
             Ok(admission) => admission,
             Err(SharedAdmissionError::QueueTimeout(_)) => return queue_timeout(proxy.max_wait),
-            Err(SharedAdmissionError::Storage(_)) => {
+            Err(SharedAdmissionError::Storage(storage_error)) => {
                 self.refresh_counts(credentials, metrics).await;
-                return unavailable();
+                return admission_unavailable(storage_error, metrics);
             }
         };
         let queue_wait_ms = millis(queued.elapsed());
@@ -249,4 +249,17 @@ fn unavailable() -> Response {
         "adapter_unavailable",
         "Claude adapter unavailable",
     )
+}
+
+fn admission_unavailable(storage_error: StorageError, metrics: &CredentialMetrics) -> Response {
+    match storage_error {
+        StorageError::Conflict => metrics.record_shared_limit_conflict(),
+        StorageError::Unavailable
+        | StorageError::IncompatibleSchema
+        | StorageError::UnsupportedServer
+        | StorageError::MigrationFailed
+        | StorageError::InvalidData
+        | StorageError::NotFound => {}
+    }
+    unavailable()
 }
