@@ -20,7 +20,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     assert_eq!(store.credential_key_references("old").await.unwrap(), 2);
     let config = encryption(&db);
     let text = format!(
-        "{}\n[credential_encryption]\nactive_key_id='new'\n[credential_encryption.keys]\nold='{}'\nnew='{}'\n",
+        "{}\n[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id='new'\n[credential_encryption.keys]\nold='{}'\nnew='{}'\n",
         fs::read_to_string(&db.path).unwrap(),
         config.keys.get("old").unwrap().display(),
         config.keys.get("new").unwrap().display()

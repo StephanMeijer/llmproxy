@@ -52,6 +52,9 @@ impl Credentials {
             secret,
         )?;
         let mut tx = self.storage.begin().await?;
+        if !tx.person(person).await?.enabled {
+            return Err(StorageError::Conflict);
+        }
         tx.insert_credential(&record, &fingerprint).await?;
         tx.commit().await?;
         Ok(CredentialVersion {
@@ -70,6 +73,9 @@ impl Credentials {
     ) -> Result<CredentialVersion, StorageError> {
         let (record, fingerprint) = self.encrypt(version, secret)?;
         let mut tx = self.storage.begin().await?;
+        if !tx.person(version.person).await?.enabled {
+            return Err(StorageError::Conflict);
+        }
         let generation = tx.replace_credential(&record, &fingerprint).await?;
         tx.commit().await?;
         Ok(CredentialVersion {

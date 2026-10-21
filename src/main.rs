@@ -11,6 +11,8 @@ const CONFIG_ENV: &str = "LLMPROXY_CONFIG";
 const DEFAULT_CONFIG: &str = "/etc/llmproxy/config.toml";
 const CHECK_FLAG: &str = "--check-config";
 
+mod operator;
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -22,8 +24,11 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<(), Box<dyn Error>> {
+async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "auth") {
+        return operator::run(&args).await;
+    }
     if args.first().is_some_and(|arg| arg == "db") {
         return migrate(&args).await;
     }
@@ -67,7 +72,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn migrate(args: &[String]) -> Result<(), Box<dyn Error>> {
+async fn migrate(args: &[String]) -> Result<(), Box<dyn Error + Send + Sync>> {
     let path = match args {
         [_, command] if command == "migrate" => {
             env::var(CONFIG_ENV).unwrap_or_else(|_| DEFAULT_CONFIG.to_owned())
@@ -85,7 +90,7 @@ async fn migrate(args: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn reencrypt(args: &[String]) -> Result<(), Box<dyn Error>> {
+async fn reencrypt(args: &[String]) -> Result<(), Box<dyn Error + Send + Sync>> {
     let target = match args {
         [_, command, flag, target] if command == "reencrypt" && flag == "--to" => target,
         _ => return Err("usage: llmproxy credentials reencrypt --to <key-id>".into()),
