@@ -104,12 +104,45 @@ fn check_config_accepts_a_valid_file() {
 }
 
 #[test]
-fn check_config_names_the_unset_variable() {
+fn check_config_reports_an_unset_variable_without_its_name() {
     let path = write_config("unset", &config(0, ""));
     let output = run(&["--check-config", path.to_str().unwrap()], None);
     assert_eq!(output.status.code(), Some(1));
-    assert!(stderr(&output).contains(&format!("{TOKEN_VAR} is not set")));
+    assert!(stderr(&output).contains("environment variable is not set"));
+    assert!(!stderr(&output).contains(TOKEN_VAR));
     fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn check_config_redacts_closed_secret_bearing_placeholders()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CANARY: &str = "closed-reference-cli-canary";
+    let url = format!("postgres://user:{CANARY}@127.0.0.1:1/db");
+    let path = write_config(
+        "closed-reference",
+        &config(
+            0,
+            &format!("[postgres]\nurl = \"${{{url}}}\"\nnamespace = \"test\"\n"),
+        ),
+    );
+    let output = run(
+        &[
+            "--check-config",
+            path.to_str().ok_or("non-UTF-8 config path")?,
+        ],
+        Some("t"),
+    );
+    fs::remove_file(path)?;
+    assert_eq!(output.status.code(), Some(1));
+    let observed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr(&output)
+    );
+    assert!(!observed.contains(CANARY));
+    assert!(!observed.contains(&url));
+    assert!(observed.contains("environment variable is not set"));
+    Ok(())
 }
 
 #[test]
