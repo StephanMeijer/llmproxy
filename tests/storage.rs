@@ -2,12 +2,16 @@
 
 #[path = "migrations/support.rs"]
 mod database;
+#[path = "storage/invalid_credential.rs"]
+mod invalid_credential;
 #[path = "storage/outage.rs"]
 mod outage;
 #[path = "storage/repositories.rs"]
 mod repositories;
 #[path = "storage/runtime.rs"]
 mod runtime;
+#[path = "storage/shared_listener.rs"]
+mod shared_listener;
 
 use llmproxy::{
     config::Config,
