@@ -81,3 +81,33 @@ async fn fingerprint_file_requires_exact_key_length() {
     );
     op.close().await;
 }
+
+#[tokio::test]
+async fn operator_reports_database_url_the_driver_rejects() {
+    // Given a URL that passes offline validation but the driver cannot build options from.
+    let op = Operator::new().await;
+    let path = op.db.path.with_extension("bogus.toml");
+    fs::write(
+        &path,
+        "listen='127.0.0.1:0'\nproxy_token='t'\n[postgres]\nurl='postgres://127.0.0.1:1/db?sslmode=bogus'\nnamespace='test'\n",
+    )
+    .unwrap();
+    // When an operator command starts against it.
+    let output = Command::new(BIN)
+        .args([
+            "auth",
+            "person",
+            "status",
+            &uuid::Uuid::new_v4().to_string(),
+        ])
+        .env("LLMPROXY_CONFIG", &path)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    // Then it fails before any database access with a sanitized message.
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error:"), "{stderr}");
+    assert!(!stderr.contains("bogus"), "{stderr}");
+}
