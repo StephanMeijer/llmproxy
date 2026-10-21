@@ -14,6 +14,7 @@ pub struct Person {
     pub display_name: String,
     pub enabled: bool,
     pub version: i64,
+    pub created_at: String,
 }
 
 /// Hashes are returned only for explicit authentication; this type cannot be formatted.
@@ -35,7 +36,7 @@ impl StorageTransaction {
         id: PersonId,
         name: &str,
     ) -> Result<Person, StorageError> {
-        Ok(sqlx::query_as("INSERT INTO people(namespace,id,display_name) VALUES ($1,$2,$3) RETURNING id,display_name,enabled,version")
+        Ok(sqlx::query_as("INSERT INTO people(namespace,id,display_name) VALUES ($1,$2,$3) RETURNING id,display_name,enabled,version,created_at::text")
             .bind(&self.namespace).bind(id).bind(name).fetch_one(&mut *self.tx).await?)
     }
 
@@ -43,7 +44,7 @@ impl StorageTransaction {
     /// # Errors
     /// Returns `NotFound` or a sanitized database failure.
     pub async fn person(&mut self, id: PersonId) -> Result<Person, StorageError> {
-        Ok(sqlx::query_as("SELECT id,display_name,enabled,version FROM people WHERE namespace=$1 AND id=$2 FOR UPDATE")
+        Ok(sqlx::query_as("SELECT id,display_name,enabled,version,created_at::text FROM people WHERE namespace=$1 AND id=$2 FOR UPDATE")
             .bind(&self.namespace).bind(id).fetch_one(&mut *self.tx).await?)
     }
 
@@ -51,7 +52,7 @@ impl StorageTransaction {
     /// # Errors
     /// Returns `Conflict` on concurrent modification, otherwise a database error.
     pub async fn update_person(&mut self, person: &Person) -> Result<Person, StorageError> {
-        sqlx::query_as("UPDATE people SET display_name=$3,enabled=$4,version=version+1 WHERE namespace=$1 AND id=$2 AND version=$5 RETURNING id,display_name,enabled,version")
+        sqlx::query_as("UPDATE people SET display_name=$3,enabled=$4,version=version+1 WHERE namespace=$1 AND id=$2 AND version=$5 RETURNING id,display_name,enabled,version,created_at::text")
             .bind(&self.namespace).bind(person.id).bind(&person.display_name).bind(person.enabled).bind(person.version)
             .fetch_optional(&mut *self.tx).await?.ok_or(StorageError::Conflict)
     }

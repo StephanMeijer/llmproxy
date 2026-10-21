@@ -54,6 +54,7 @@ fn encryption(db: &database::Database) -> CredentialEncryptionConfig {
     fs::write(&new, [2; 32]).unwrap();
     CredentialEncryptionConfig {
         active_key_id: "new".into(),
+        fingerprint_key_file: PathBuf::from("/nonexistent/fingerprint"),
         keys: BTreeMap::from([("old".into(), old), ("new".into(), new)]),
     }
 }
