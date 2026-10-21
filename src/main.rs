@@ -3,6 +3,7 @@ use std::{env, error::Error, path::PathBuf, process::ExitCode, sync::Arc};
 use llmproxy::{
     config::Config,
     proxy::{Proxy, metrics_router, router},
+    storage,
 };
 use tokio::{net::TcpListener, signal};
 
@@ -23,6 +24,9 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "db") {
+        return migrate(&args).await;
+    }
     let check_only = args.iter().any(|a| a == CHECK_FLAG);
     let path = args
         .iter()
@@ -57,6 +61,24 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
         None => clients.await?,
     }
+    Ok(())
+}
+
+async fn migrate(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let path = match args {
+        [_, command] if command == "migrate" => {
+            env::var(CONFIG_ENV).unwrap_or_else(|_| DEFAULT_CONFIG.to_owned())
+        }
+        [_, command, path] if command == "migrate" && !path.starts_with('-') => path.clone(),
+        _ => return Err("usage: llmproxy db migrate [config]".into()),
+    };
+    let config = Config::load(&PathBuf::from(path))?;
+    let postgres = config
+        .postgres
+        .as_ref()
+        .ok_or("db migrate requires [postgres] configuration")?;
+    storage::migrate(postgres).await?;
+    println!("database migrations: ok");
     Ok(())
 }
 
