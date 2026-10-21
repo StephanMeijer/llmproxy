@@ -1,5 +1,5 @@
 use super::*;
-use llmproxy::storage::ChangeListener;
+use llmproxy::storage::{ChangeListener, StorageError};
 
 const WAITERS: usize = 256;
 
@@ -133,6 +133,57 @@ async fn slow_subscriber_coalesces_notification_burst_and_rereads() {
     // Then coalescing causes an immediate authoritative read, never a lag error.
     assert_eq!(record.generation, 1);
     drop(reader);
+    store.close().await;
+    db.close().await;
+}
+
+#[tokio::test]
+async fn subscribing_after_runtime_close_fails_without_waiting_for_notification() {
+    // Given a closed runtime that never started its notification task.
+    let (db, store, person) = setup().await;
+    store.close().await;
+    let mut reader = ChangeListener::new(store.clone());
+    // When a new subscriber requests a long notification wait.
+    let result = tokio::time::timeout(SHORT, reader.credential(person, LONG))
+        .await
+        .unwrap();
+    // Then the closed listener fails immediately with the public availability error.
+    assert!(matches!(result, Err(StorageError::Unavailable)));
+    store.close().await;
+    db.close().await;
+}
+
+#[tokio::test]
+async fn failed_initial_listener_connection_retries_after_database_reopens() {
+    // Given a live transaction pool but a database rejecting new connections.
+    let (db, store, person) = setup().await;
+    let name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER DATABASE {name} ALLOW_CONNECTIONS false"
+    )))
+    .execute(&db.admin)
+    .await
+    .unwrap();
+    let mut reader = ChangeListener::new(store.clone());
+    assert!(reader.credential(person, LONG).await.unwrap().is_none());
+    assert_eq!(connections(&db).await.1, 0);
+    // When the database accepts connections again without restarting the runtime.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER DATABASE {name} ALLOW_CONNECTIONS true"
+    )))
+    .execute(&db.admin)
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(LONG, reader.credential(person, LONG * 2))
+        .await
+        .unwrap()
+        .unwrap();
+    // Then the retry establishes LISTEN and wakes the subscriber before its timeout.
+    assert!(result.is_none());
+    assert_eq!(connections(&db).await.1, 1);
     store.close().await;
     db.close().await;
 }

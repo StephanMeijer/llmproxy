@@ -2,6 +2,8 @@
 
 #[path = "migrations/support.rs"]
 mod database;
+#[path = "storage/invalid_credential.rs"]
+mod invalid_credential;
 #[path = "storage/outage.rs"]
 mod outage;
 #[path = "storage/repositories.rs"]
