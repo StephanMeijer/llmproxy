@@ -152,6 +152,18 @@ async fn lease_loss_cancels_body_under_downstream_backpressure() {
     tokio::time::timeout(WAIT, pumping).await.unwrap().unwrap();
     f.state_count("concurrency_leases", 0).await;
     drop(response);
+    // The stalled downstream write only ends once the client socket closes, which needs this
+    // runtime polled; stopping the binary blocks it, so wait for the proxy to see the disconnect.
+    tokio::time::timeout(WAIT, async {
+        while !super::runtime_metrics::scrape(&f, &a, "backpressure")
+            .await
+            .contains("llm3_http_requests_in_flight 0\n")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     artifact(
         "backpressure.txt",
         "PASS second lease loss actively drops upstream while downstream body is never polled; all leases released\n",
