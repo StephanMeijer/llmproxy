@@ -32,6 +32,9 @@ use crate::{
     metrics::CredentialMetrics,
 };
 
+#[path = "claude.rs"]
+mod claude;
+
 const HEALTH_PATH: &str = "/healthz";
 const METRICS_PATH: &str = "/metrics";
 const CHAT_COMPLETIONS_SUFFIX: &str = "/chat/completions";
@@ -324,7 +327,7 @@ impl Drop for Timed {
 
 pub struct Proxy {
     auth: Authenticator,
-    claude_enabled: bool,
+    claude: Option<claude::Claude>,
     max_wait: Duration,
     max_body: usize,
     tool_choice_prefix: Option<String>,
@@ -362,13 +365,14 @@ impl Proxy {
             .redirect(redirect::Policy::none())
             .build()
             .map_err(|e| ConfigError(format!("build http client: {e}")))?;
+        let (claude, limits) = claude::Claude::configure(&config)?;
         Ok(Self {
             auth: Authenticator::new(config.proxy_token, config.postgres.as_ref()),
-            claude_enabled: config.claude.is_some(),
+            claude,
             max_wait: config.max_wait,
             max_body: config.max_body,
             tool_choice_prefix: config.tool_choice_prefix,
-            limits: Limits::new(&config.limits)?,
+            limits,
             routes,
             client,
             metrics: Metrics::default(),
@@ -386,7 +390,7 @@ impl Proxy {
             .routes
             .iter()
             .find_map(|r| Some((r, path.strip_prefix(&r.prefix)?)));
-        let kind = if self.claude_enabled && (path == "/claude" || path.starts_with("/claude/")) {
+        let kind = if self.claude.is_some() && (path == "/claude" || path.starts_with("/claude/")) {
             RouteKind::Claude
         } else if matched.is_some() {
             RouteKind::Static
@@ -411,14 +415,19 @@ impl Proxy {
             }
         }
         if kind == RouteKind::Claude {
-            return (
-                "claude",
-                error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "adapter_unavailable",
-                    "Claude adapter unavailable",
-                ),
-            );
+            if parts.uri.path() != claude::MESSAGES_PATH || parts.method != Method::POST {
+                return (
+                    "claude",
+                    error(
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "no route matches this path",
+                    ),
+                );
+            }
+            if let Some(claude) = &self.claude {
+                return ("claude", claude.forward(self, &parts, body).await);
+            }
         }
         let Some((route, rest)) = matched else {
             return (
@@ -565,7 +574,7 @@ fn request_headers(parts: &Parts, route: &Route) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (name, value) in &parts.headers {
         let n = name.as_str();
-        if !HOP_BY_HOP.contains(&n)
+        if !hop_by_hop(&parts.headers, name)
             && !NOT_FORWARDED.contains(&n)
             && !n.starts_with(X_FORWARDED_PREFIX)
         {
@@ -590,21 +599,54 @@ fn relay(
     retries: u32,
     permits: Vec<OwnedSemaphorePermit>,
 ) -> Response {
-    let status = upstream.status();
-    let mut headers = HeaderMap::new();
-    for (name, value) in upstream.headers() {
-        if !HOP_BY_HOP.contains(&name.as_str()) {
-            headers.append(name.clone(), value.clone());
-        }
+    relay_stream(
+        route,
+        upstream.status(),
+        upstream.headers().clone(),
+        queue_wait_ms,
+        retries,
+        upstream.bytes_stream().map(move |chunk| {
+            let _held = &permits;
+            chunk
+        }),
+    )
+}
+
+fn hop_by_hop(headers: &HeaderMap, name: &HeaderName) -> bool {
+    HOP_BY_HOP.contains(&name.as_str())
+        || headers
+            .get_all(header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|token| token.trim().eq_ignore_ascii_case(name.as_str()))
+}
+
+fn relay_stream<S, E>(
+    route: &Route,
+    status: StatusCode,
+    upstream_headers: HeaderMap,
+    queue_wait_ms: u64,
+    retries: u32,
+    stream: S,
+) -> Response
+where
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let blocked: Vec<_> = upstream_headers
+        .keys()
+        .filter(|name| hop_by_hop(&upstream_headers, name))
+        .cloned()
+        .collect();
+    let mut headers = upstream_headers;
+    for name in blocked {
+        headers.remove(name);
     }
     headers.insert(HEADER_ROUTE, route.name_header.clone());
     headers.insert(HEADER_QUEUE_WAIT, HeaderValue::from(queue_wait_ms));
     headers.insert(HEADER_RETRIES, HeaderValue::from(retries));
 
-    let stream = upstream.bytes_stream().map(move |chunk| {
-        let _held = &permits;
-        chunk
-    });
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
     *response.headers_mut() = headers;

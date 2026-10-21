@@ -63,6 +63,44 @@ impl LeaseCancellation {
     }
 }
 
+/// Cancellation of any lease held by a single admitted request.
+#[derive(Clone)]
+pub struct LeaseCancellations(Vec<LeaseCancellation>);
+
+impl LeaseCancellations {
+    #[must_use]
+    pub fn new(leases: &[Option<LeaseGuard>]) -> Self {
+        Self(
+            leases
+                .iter()
+                .flatten()
+                .map(LeaseGuard::cancellation)
+                .collect(),
+        )
+    }
+
+    pub async fn cancelled(&mut self) {
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+        let mut waiting: FuturesUnordered<_> = self
+            .0
+            .iter_mut()
+            .map(LeaseCancellation::cancelled)
+            .collect();
+        if waiting.next().await.is_none() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// # Errors
+    /// Returns `LeaseLost` if any owned lease loses authority.
+    pub async fn run<F: Future>(&mut self, work: F) -> Result<F::Output, LeaseLost> {
+        tokio::select! { biased;
+            () = self.cancelled() => Err(LeaseLost),
+            output = work => Ok(output),
+        }
+    }
+}
+
 /// Hold through retries and body completion; dropping signals conditional release.
 #[must_use]
 pub struct LeaseGuard {
