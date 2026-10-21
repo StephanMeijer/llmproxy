@@ -71,7 +71,14 @@ pub async fn binary_scenario() {
         ("/claude/v1/messages", LEGACY, 403),
     ] {
         let response = client
-            .get(format!("{base}{path}"))
+            .request(
+                if path == "/claude/v1/messages" {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::GET
+                },
+                format!("{base}{path}"),
+            )
             .bearer_auth(token)
             .send()
             .await
@@ -109,7 +116,14 @@ async fn check_authenticated_paths(client: &reqwest::Client, fixture: &Fixture, 
         ("/unknown", LEGACY, 404, Some("not_found")),
     ] {
         let response = client
-            .get(format!("{base}{path}"))
+            .request(
+                if path == "/claude/v1/messages" {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::GET
+                },
+                format!("{base}{path}"),
+            )
             .bearer_auth(token)
             .send()
             .await
