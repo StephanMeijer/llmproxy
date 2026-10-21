@@ -12,6 +12,8 @@ use tokio::{
 
 use crate::config::{ConfigError, LimitConfig};
 
+pub mod shared;
+
 const SECS_PER_MINUTE: f64 = 60.0;
 
 struct Bucket {
@@ -19,6 +21,31 @@ struct Bucket {
     per_sec: f64,
     level: f64,
     at: Instant,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unit test assertions")]
+mod accounting_comparison {
+    use super::{Bucket, shared::FixedBucket};
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn fixed_point_and_local_decisions_agree_within_one_database_microsecond() {
+        for rate in [1, 7, 60, 1001, u32::MAX] {
+            for elapsed in [0, 1, 999, 1_000_000, 59_999_999, 60_000_000] {
+                let mut local = Bucket::new(rate, 0);
+                let mut shared = FixedBucket::new(rate, 0).unwrap();
+                local.take(f64::from(rate));
+                shared.charge(usize::try_from(rate).unwrap()).unwrap();
+                let duration = Duration::from_micros(elapsed);
+                tokio::time::advance(duration).await;
+                shared.refill(duration);
+                let local_wait = local.wait(1.0);
+                let shared_wait = shared.wait(1);
+                assert!(local_wait.abs_diff(shared_wait) <= Duration::from_micros(1));
+            }
+        }
+    }
 }
 
 impl Bucket {
@@ -145,8 +172,9 @@ impl Limit {
 }
 
 pub struct Limits {
-    limits: Vec<Limit>,
+    pools: Vec<Limit>,
     by_model: bool,
+    exclude_claude: bool,
 }
 
 impl Limits {
@@ -155,8 +183,9 @@ impl Limits {
     /// has a zero rate or cap.
     pub fn new(configs: &[LimitConfig]) -> Result<Self, ConfigError> {
         Ok(Self {
-            limits: configs.iter().map(Limit::new).collect::<Result<_, _>>()?,
+            pools: configs.iter().map(Limit::new).collect::<Result<_, _>>()?,
             by_model: configs.iter().any(|c| c.model.is_some()),
+            exclude_claude: false,
         })
     }
 
@@ -174,13 +203,16 @@ impl Limits {
         model: Option<&str>,
         tokens: usize,
     ) -> Vec<OwnedSemaphorePermit> {
+        if self.exclude_claude && path.starts_with(shared::CLAUDE_PREFIX) {
+            return Vec::new();
+        }
         #[allow(
             clippy::cast_precision_loss,
             reason = "token estimates are far below 2^52"
         )]
         let tokens = tokens as f64;
         let mut permits = Vec::new();
-        for limit in self.limits.iter().filter(|l| l.matches(path, model)) {
+        for limit in self.pools.iter().filter(|l| l.matches(path, model)) {
             permits.extend(limit.acquire(tokens).await);
         }
         permits
