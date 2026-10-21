@@ -5,6 +5,8 @@ use sqlx::AssertSqlSafe;
 use std::{fs, process::Command, time::Duration};
 use uuid::Uuid;
 
+#[path = "migrations/fixed_point.rs"]
+mod fixed_point;
 #[path = "migrations/support.rs"]
 mod support;
 use support::Database;
@@ -38,7 +40,7 @@ async fn concurrent_cli_migrations_are_idempotent() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(count, 2);
     storage::check_schema(&db.pool).await.unwrap();
     db.close().await;
 }
@@ -51,7 +53,7 @@ async fn missing_newer_and_modified_schemas_fail_closed() {
         Err(StorageError::IncompatibleSchema)
     );
     storage::migrate(&db.config).await.unwrap();
-    sqlx::query("UPDATE _sqlx_migrations SET version = 999")
+    sqlx::query("UPDATE _sqlx_migrations SET version = 999 WHERE version = 2")
         .execute(&db.pool)
         .await
         .unwrap();
@@ -59,7 +61,7 @@ async fn missing_newer_and_modified_schemas_fail_closed() {
         storage::check_schema(&db.pool).await,
         Err(StorageError::IncompatibleSchema)
     );
-    sqlx::query("UPDATE _sqlx_migrations SET version = 1, checksum = '\\x00'")
+    sqlx::query("UPDATE _sqlx_migrations SET version = 2, checksum = '\\x00' WHERE version = 999")
         .execute(&db.pool)
         .await
         .unwrap();
