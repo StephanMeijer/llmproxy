@@ -19,7 +19,22 @@ env:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: local-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      LLMPROXY_TEST_DATABASE_URL: postgres://postgres:local-test-only@127.0.0.1:5432/postgres
+      RUST_TEST_THREADS: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,5 +47,17 @@ jobs:
           tool: cargo-llvm-cov
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Check PostgreSQL and Docker readiness
+        env:
+          LLMPROXY_CREDENTIAL_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          printf 'LLMPROXY_CREDENTIAL_CONTAINER=%s\n' "$LLMPROXY_CREDENTIAL_CONTAINER" >> "$GITHUB_ENV"
+          docker exec "$LLMPROXY_CREDENTIAL_CONTAINER" pg_isready -U postgres
+          docker info
+          docker pull postgres:18
+          docker pull postgres:18-alpine
+      - run: cargo test --locked
       # This run is also the test run: it fails if a test fails or line coverage drops below 99%.
-      - run: cargo llvm-cov --locked --fail-under-lines 99
+      - run: cargo llvm-cov --locked --fail-under-lines 99 --show-missing-lines
+        env:
+          CARGO_TARGET_DIR: target/cov
