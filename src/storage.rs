@@ -14,7 +14,10 @@ mod listener;
 mod people;
 mod queue;
 mod runtime;
-pub use credentials::{CredentialRecord, CredentialState};
+pub use credentials::{
+    CredentialRecord, CredentialSnapshot, CredentialState, CredentialVersion, Credentials,
+    RotationCounts,
+};
 pub use limits::{LimitKey, LimitSnapshot, RateKind, RateState};
 pub use listener::ChangeListener;
 pub use people::{Person, PersonId, TokenId, TokenRecord};
