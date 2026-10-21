@@ -2,6 +2,8 @@
 
 #[path = "claude/cancellation.rs"]
 mod cancellation;
+#[path = "claude/conflict_metrics.rs"]
+mod conflict_metrics;
 #[path = "migrations/support.rs"]
 mod database;
 #[path = "claude/edges.rs"]
