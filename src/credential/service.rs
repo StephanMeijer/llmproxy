@@ -4,6 +4,9 @@ use crate::{
     storage::{PersonId, Storage, StorageError},
 };
 
+#[path = "counts.rs"]
+mod counts;
+
 /// Identity of a credential generation observed by an operator or admitted request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CredentialVersion {

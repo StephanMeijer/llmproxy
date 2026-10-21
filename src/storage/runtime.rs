@@ -4,11 +4,12 @@ use sqlx::{
     ConnectOptions, PgPool, Postgres, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
-use std::{str::FromStr, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 /// Lazy namespace-scoped database runtime. Construction never contacts `PostgreSQL`.
 #[derive(Clone)]
 pub struct Storage {
+    metrics: Option<Arc<crate::metrics::CredentialMetrics>>,
     pub(super) pool: PgPool,
     pub(super) namespace: String,
     pub(super) timeout: Duration,
@@ -34,10 +35,22 @@ impl Storage {
             .acquire_timeout(config.acquire_timeout.min(config.connect_timeout))
             .connect_lazy_with(options);
         Ok(Self {
+            metrics: None,
             pool,
             namespace: config.namespace.clone(),
             timeout: config.acquire_timeout,
         })
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: Arc<crate::metrics::CredentialMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    pub(crate) fn observe_availability(&self, available: bool) {
+        if let Some(metrics) = &self.metrics {
+            metrics.set_postgres_available(available);
+        }
     }
 
     /// Opens a schema-checked transaction; dropping it rolls back its mutations.

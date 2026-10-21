@@ -4,6 +4,8 @@
 mod concurrency;
 #[path = "migrations/support.rs"]
 mod database;
+#[path = "operator_cli/edges.rs"]
+mod edges;
 #[path = "operator_cli/failure.rs"]
 mod failure;
 #[path = "operator_cli/input.rs"]

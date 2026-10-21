@@ -225,7 +225,7 @@ fn render_durations(name: &str, help: &str, durations: &Durations) -> String {
 /// Request counters, two gauges and two duration histograms, rendered as Prometheus text.
 #[derive(Default)]
 pub struct Metrics {
-    credentials: CredentialMetrics,
+    credentials: Arc<CredentialMetrics>,
     /// Requests from arrival until their response body ends.
     in_flight: Arc<AtomicI64>,
     /// Requests currently waiting on a limit.
@@ -239,7 +239,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Bounded telemetry for database and credential lifecycle owners.
-    pub const fn credentials(&self) -> &CredentialMetrics {
+    pub fn credentials(&self) -> &CredentialMetrics {
         &self.credentials
     }
 
@@ -366,8 +366,13 @@ impl Proxy {
             .build()
             .map_err(|e| ConfigError(format!("build http client: {e}")))?;
         let (claude, limits) = claude::Claude::configure(&config)?;
+        let auth = Authenticator::new(config.proxy_token, config.postgres.as_ref());
+        let metrics = Metrics {
+            credentials: Arc::clone(&auth.metrics),
+            ..Metrics::default()
+        };
         Ok(Self {
-            auth: Authenticator::new(config.proxy_token, config.postgres.as_ref()),
+            auth,
             claude,
             max_wait: config.max_wait,
             max_body: config.max_body,
@@ -375,7 +380,7 @@ impl Proxy {
             limits,
             routes,
             client,
-            metrics: Metrics::default(),
+            metrics,
         })
     }
 

@@ -2,6 +2,8 @@
 
 #[path = "migrations/support.rs"]
 mod database;
+#[path = "credentials/disabled.rs"]
+mod disabled;
 #[path = "credentials/lifecycle.rs"]
 mod lifecycle;
 #[path = "credentials/rotation.rs"]

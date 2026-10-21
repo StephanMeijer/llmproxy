@@ -2,6 +2,8 @@
 
 #[path = "migrations/support.rs"]
 mod database;
+#[path = "shared_concurrency/edges.rs"]
+mod edges;
 #[path = "shared_concurrency/migration.rs"]
 mod migration;
 #[path = "shared_concurrency/process.rs"]
