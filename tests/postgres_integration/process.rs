@@ -1,3 +1,5 @@
+#[path = "../common/shutdown.rs"]
+mod shutdown;
 use std::{
     fs,
     io::Write,
@@ -63,9 +65,7 @@ impl Replica {
 
 impl Drop for Replica {
     fn drop(&mut self) {
-        if self.child.try_wait().unwrap().is_none() {
-            self.kill();
-        }
+        shutdown::stop(&mut self.child);
     }
 }
 

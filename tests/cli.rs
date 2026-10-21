@@ -19,13 +19,15 @@ const DEFAULT_CONFIG: &str = "/etc/llmproxy/config.toml";
 const POLL: Duration = Duration::from_millis(50);
 const PATIENCE: Duration = Duration::from_secs(10);
 
+#[path = "common/shutdown.rs"]
+mod shutdown;
+
 /// Kills the child if a test fails before it exits, so no server outlives the test run.
 struct Server(Child);
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
+        shutdown::stop(&mut self.0);
     }
 }
 

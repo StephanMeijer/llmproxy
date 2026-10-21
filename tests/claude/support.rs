@@ -1,4 +1,6 @@
 use super::database;
+#[path = "../common/shutdown.rs"]
+mod shutdown;
 use axum::{
     body::{Body, Bytes, to_bytes},
     extract::Request,
@@ -38,16 +40,14 @@ pub struct Hit {
 
 pub struct Binary {
     pub base: String,
+    pub metrics: String,
     pub log: PathBuf,
     child: Child,
     config: PathBuf,
 }
 impl Drop for Binary {
     fn drop(&mut self) {
-        if self.child.try_wait().unwrap().is_none() {
-            self.child.kill().unwrap();
-            self.child.wait().unwrap();
-        }
+        shutdown::stop(&mut self.child);
         fs::remove_file(&self.config).unwrap();
     }
 }
@@ -153,6 +153,10 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
+        let metrics_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metrics_addr = metrics_listener.local_addr().unwrap();
+        drop(metrics_listener);
+        let settings = format!("metrics_listen='{metrics_addr}'\n{settings}");
         let path = self
             .db
             .path
@@ -168,6 +172,7 @@ impl Fixture {
             .unwrap();
         let binary = Binary {
             base: format!("http://{addr}"),
+            metrics: format!("http://{metrics_addr}/metrics"),
             child,
             config: path,
             log,
