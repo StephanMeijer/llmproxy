@@ -56,6 +56,10 @@ jobs:
           docker info
           docker pull postgres:18
           docker pull postgres:18-alpine
+      - name: Explicitly migrate the CI database
+        run: |
+          printf '%s\n' 'listen = "127.0.0.1:0"' 'proxy_token = "ci-only"' '[postgres]' "url = \"$LLMPROXY_TEST_DATABASE_URL\"" 'namespace = "ci"' > "$RUNNER_TEMP/llmproxy-ci.toml"
+          cargo run --locked -- db migrate "$RUNNER_TEMP/llmproxy-ci.toml"
       - run: cargo test --locked
       # This run is also the test run: it fails if a test fails or line coverage drops below 99%.
       - run: cargo llvm-cov --locked --fail-under-lines 99 --show-missing-lines

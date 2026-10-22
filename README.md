@@ -124,9 +124,18 @@ llm3_http_requests_in_flight                      gauge
 llm3_http_requests_held                           gauge
 llm3_http_request_header_duration_seconds{route}  histogram
 llm3_http_request_duration_seconds{route}         histogram
+llm3_postgres_available                          gauge
+llm3_provider_credentials{provider,state}         gauge
+llm3_credential_operations_total{provider,operation,outcome} counter
 ```
 
 `route` is a configured route name, `healthz`, or `other` (rejected before routing).
+
+Credential telemetry accepts only fixed labels: provider `anthropic`; states `active`, `invalid`, `removed`, `unavailable`; operations `install`, `replace`, `remove`, `invalidate`, `reencrypt`; outcomes `success`, `conflict`, `not_found`, `unavailable`. No identity, token, namespace, host, key ID, error text or model becomes a credential metric label. Request metrics retain their existing route/status labels, including a configured `claude` route.
+
+The lifecycle integration API is `Proxy::metrics().credentials()`: `set_postgres_available` records the latest observed database result, `set_credentials` replaces a complete authoritative provider count snapshot, and `record_operation` counts a completed durable operation. Availability starts at zero until observed available. Credential samples are absent until a successful snapshot and retain their last known values during outages; use the availability gauge to detect stale counts. Snapshot refreshes must be serialized by their caller. Undecryptable active credentials count only as `unavailable`. Operation counters are process-local and start over on restart.
+
+Storage/auth lifecycle wiring is pending: these gauges and counters currently change only when that public API is called. Later integration must refresh counts after startup and committed credential changes, record durable operation outcomes, and report database failure/recovery.
 
 `llm3_http_requests_in_flight` counts a request from arrival until its response body ends, so a long stream stays counted for as long as it runs, and one the client abandons stops being counted. `llm3_http_requests_held` counts only the requests currently waiting on a limit, whether ours or the provider's (waiting to retry after an upstream `429`). Alert on a backlog with `held`, not `in_flight`, which also includes healthy long streams.
 
