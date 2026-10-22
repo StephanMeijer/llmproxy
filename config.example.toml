@@ -10,6 +10,24 @@ connect_timeout = "10s"                   # upstream dial only; response reads a
 max_body = 16777216                       # bytes; larger request bodies get 413
 tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" when tools are sent without one
 
+# Optional per-person Claude API-key adapter. Enable all three sections together.
+# --check-config validates them offline, without connecting or reading the mounted key files.
+# Namespace and key IDs use 1–63 ASCII letters, digits, underscores or hyphens.
+# [postgres]
+# url = "${DATABASE_URL}"                # postgres:// or postgresql://; use sslmode=verify-full in production
+# namespace = "llmproxy"
+# max_connections = 10                   # positive pool size; default 10
+# connect_timeout = "10s"                # positive whole seconds; default 10s
+# acquire_timeout = "10s"                # positive pool acquisition timeout; default 10s
+#
+# [credential_encryption]
+# active_key_id = "primary"
+# keys = { primary = "/run/secrets/llmproxy-primary" } # mounted 32-byte master key; never inline key bytes
+#
+# [claude]                               # reserves /claude; do not add a static route named claude
+# upstream = "https://api.anthropic.com"  # default; normalized with a trailing slash
+# retry_429 = true                       # default; set false to return upstream 429 immediately
+
 # `/<name>/<rest>` is forwarded to `<upstream>/<rest>`. The client's Authorization and
 # x-api-key are always dropped; `headers` sets the provider credential ("" removes a header).
 # An upstream 429 is held and retried within max_wait. Add `retry_429 = false` to a route to pass it

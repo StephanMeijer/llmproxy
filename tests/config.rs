@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::{env, fs, path::PathBuf, time::Duration};
+use std::{env, error::Error, fs, path::PathBuf, process::Command, time::Duration};
 
 use llmproxy::{
     config::{Config, ConfigError},
@@ -10,6 +10,9 @@ use llmproxy::{
 const MINIMAL: &str = "listen = \"127.0.0.1:0\"\nproxy_token = \"${TOKEN}\"\n";
 const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;
 const UNSET_VAR: &str = "LLMPROXY_TEST_SURELY_UNSET_VAR";
+const POSTGRES: &str = "[postgres]\nurl = \"postgres://127.0.0.1:1/x\"\nnamespace = \"test_1-a\"\n";
+const ENCRYPTION: &str = "[credential_encryption]\nactive_key_id = \"key_1-a\"\nkeys = { key_1-a = \"/nonexistent/llmproxy-master-key\" }\n";
+const CLAUDE: &str = "[claude]\n";
 
 fn lookup(name: &str) -> Option<String> {
     (name == "TOKEN").then(|| "s3\"cret".to_owned())
@@ -43,9 +46,31 @@ fn expands_env_into_strings_and_applies_defaults() {
 #[test]
 fn unset_and_unterminated_references_are_errors() {
     let err = Config::parse(MINIMAL, |_| None).unwrap_err();
-    assert!(err.0.contains("TOKEN is not set"), "{err}");
+    assert!(err.0.contains("environment variable is not set"), "{err}");
     let err = Config::parse("proxy_token = \"${TOKEN\"", lookup).unwrap_err();
     assert!(err.0.contains("unterminated"), "{err}");
+}
+
+#[test]
+fn unset_references_do_not_disclose_placeholder_contents() -> Result<(), Box<dyn Error>> {
+    for placeholder in [
+        "LLMPROXY_UNSET_CONFIG_REFERENCE",
+        "postgres://user:closed-reference-canary@127.0.0.1:1/db",
+    ] {
+        let text =
+            format!("{MINIMAL}[postgres]\nurl = \"${{{placeholder}}}\"\nnamespace = \"test\"\n");
+        let error = Config::parse(&text, lookup)
+            .err()
+            .ok_or("unset reference accepted")?;
+        assert!(!error.to_string().contains(placeholder));
+        assert!(!format!("{error:?}").contains(placeholder));
+        assert!(
+            error
+                .to_string()
+                .contains("environment variable is not set")
+        );
+    }
+    Ok(())
 }
 
 /// What `proxy_token = "<value>"` expands to, with `X` set to "val".
@@ -84,7 +109,7 @@ fn other_dollars_are_left_alone() {
 #[test]
 fn references_still_fail_next_to_an_escape() {
     let err = expanded("$${X}${NOPE}").unwrap_err();
-    assert!(err.0.contains("NOPE is not set"), "{err}");
+    assert!(err.0.contains("environment variable is not set"), "{err}");
     let err = expanded("$${X} ${").unwrap_err();
     assert!(err.0.contains("unterminated"), "{err}");
 }
@@ -124,7 +149,7 @@ fn non_string_durations_and_unset_variables_inside_arrays_are_rejected() {
     assert!(Config::parse(&number, lookup).is_err());
     let nested = format!("{MINIMAL}[[limit]]\nname = \"a\"\nprefixes = [\"${{NOPE}}\"]\nrpm = 1\n");
     let err = Config::parse(&nested, lookup).unwrap_err();
-    assert!(err.0.contains("NOPE is not set"), "{err}");
+    assert!(err.0.contains("environment variable is not set"), "{err}");
 }
 
 #[test]
@@ -166,7 +191,7 @@ fn load_reads_a_file_and_names_problems() {
         &format!("listen = \"127.0.0.1:0\"\nproxy_token = \"${{{UNSET_VAR}}}\"\n"),
     );
     let err = Config::load(&unset).unwrap_err();
-    assert!(err.0.contains(&format!("{UNSET_VAR} is not set")), "{err}");
+    assert!(err.0.contains("environment variable is not set"), "{err}");
 
     let missing = env::temp_dir().join("llmproxy-no-such-file.toml");
     let err = Config::load(&missing).unwrap_err();
@@ -228,4 +253,286 @@ fn refuses_invalid_header_names_and_values() {
 fn refuses_limits_that_match_or_limit_nothing() {
     let why = refused("[[limit]]\nname = \"x\"\nrpm = 1\n");
     assert!(why.contains("limit x: set `model` or `prefixes`"), "{why}");
+}
+
+#[test]
+fn adapter_sections_are_optional_and_independently_validated() -> Result<(), Box<dyn Error>> {
+    for extra in [String::new(), POSTGRES.into(), ENCRYPTION.into()] {
+        let config = Config::parse(&format!("{MINIMAL}{extra}"), lookup)?;
+        assert!(config.claude.is_none());
+        Proxy::new(config)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn adapter_defaults_and_explicit_settings_are_offline() -> Result<(), Box<dyn Error>> {
+    let config = Config::parse(&format!("{MINIMAL}{POSTGRES}{ENCRYPTION}{CLAUDE}"), lookup)?;
+    let postgres = config.postgres.as_ref().ok_or("missing postgres")?;
+    assert_eq!(postgres.max_connections, 10);
+    assert_eq!(postgres.connect_timeout, Duration::from_secs(10));
+    assert_eq!(postgres.acquire_timeout, Duration::from_secs(10));
+    let claude = config.claude.as_ref().ok_or("missing claude")?;
+    assert_eq!(claude.upstream, "https://api.anthropic.com/");
+    assert!(claude.retry_429);
+    Proxy::new(config)?;
+
+    let text = format!(
+        "{MINIMAL}{POSTGRES}max_connections = 4\nconnect_timeout = \"3s\"\nacquire_timeout = \"5s\"\n\
+         {ENCRYPTION}{CLAUDE}upstream = \"http://localhost:1234/api\"\nretry_429 = false\n"
+    );
+    let config = Config::parse(&text, lookup)?;
+    let postgres = config.postgres.as_ref().ok_or("missing postgres")?;
+    assert_eq!(postgres.max_connections, 4);
+    assert_eq!(postgres.connect_timeout, Duration::from_secs(3));
+    assert_eq!(postgres.acquire_timeout, Duration::from_secs(5));
+    let claude = config.claude.as_ref().ok_or("missing claude")?;
+    assert_eq!(claude.upstream, "http://localhost:1234/api/");
+    assert!(!claude.retry_429);
+    Proxy::new(config)?;
+    Ok(())
+}
+
+#[test]
+fn adapter_environment_expansion_preserves_value_boundaries() -> Result<(), Box<dyn Error>> {
+    let text = format!(
+        "{MINIMAL}[postgres]\nurl = \"${{DB_URL}}\"\nnamespace = \"${{NAMESPACE}}\"\n\
+         [credential_encryption]\nactive_key_id = \"key_1-a\"\nkeys = {{ key_1-a = \"${{KEY_FILE}}\" }}\n\
+         [claude]\nupstream = \"${{UPSTREAM}}\"\n"
+    );
+    let config = Config::parse(&text, |name| match name {
+        "DB_URL" => Some("postgresql://127.0.0.1:1/x?sslmode=require".into()),
+        "NAMESPACE" => Some("people".into()),
+        "KEY_FILE" => Some("/nonexistent/key-\"quoted\"".into()),
+        "UPSTREAM" => Some("http://localhost:1234/api/".into()),
+        other => lookup(other),
+    })?;
+    let encryption = config
+        .credential_encryption
+        .as_ref()
+        .ok_or("missing keys")?;
+    assert_eq!(
+        encryption.keys.get("key_1-a"),
+        Some(&PathBuf::from("/nonexistent/key-\"quoted\""))
+    );
+    Proxy::new(config)?;
+    Ok(())
+}
+
+#[test]
+fn claude_requires_both_storage_and_encryption() {
+    for sections in [
+        CLAUDE.to_owned(),
+        format!("{POSTGRES}{CLAUDE}"),
+        format!("{ENCRYPTION}{CLAUDE}"),
+    ] {
+        assert!(
+            refused(&sections).contains("claude requires [postgres] and [credential_encryption]")
+        );
+    }
+}
+
+#[test]
+fn claude_reserves_only_its_enabled_static_route_name() -> Result<(), Box<dyn Error>> {
+    let route = "[[route]]\nname = \"claude\"\nupstream = \"http://localhost\"\n";
+    assert!(
+        refused(&format!("{POSTGRES}{ENCRYPTION}{CLAUDE}{route}"))
+            .contains("prefix /claude is reserved")
+    );
+    Proxy::new(Config::parse(&format!("{MINIMAL}{route}"), lookup)?)?;
+    let allowed = route.replace("name = \"claude\"", "name = \"claude-test\"");
+    Proxy::new(Config::parse(
+        &format!("{MINIMAL}{POSTGRES}{ENCRYPTION}{CLAUDE}{allowed}"),
+        lookup,
+    )?)?;
+    Ok(())
+}
+
+#[test]
+fn proxy_revalidates_adapter_settings_after_public_config_changes() -> Result<(), Box<dyn Error>> {
+    let mut config = Config::parse(&format!("{MINIMAL}{POSTGRES}{ENCRYPTION}{CLAUDE}"), lookup)?;
+    config.postgres = None;
+    assert!(
+        Proxy::new(config)
+            .err()
+            .ok_or("missing validation")?
+            .to_string()
+            .contains("claude requires")
+    );
+    Ok(())
+}
+
+#[test]
+fn adapter_unknown_fields_and_bad_types_are_rejected() {
+    for extra in [
+        format!("{POSTGRES}max_connection = 1\n"),
+        format!("{ENCRYPTION}active_key = \"a\"\n"),
+        format!("{POSTGRES}{ENCRYPTION}{CLAUDE}upsteam = \"http://h\"\n"),
+        format!("{POSTGRES}max_connections = \"bad\"\n"),
+        format!("{POSTGRES}{ENCRYPTION}{CLAUDE}retry_429 = \"yes\"\n"),
+        "[credential_encryption]\nactive_key_id = \"a\"\nkeys = { a = 42 }\n".into(),
+    ] {
+        assert!(refused(&extra).contains("invalid config"));
+    }
+}
+
+#[test]
+fn namespace_and_key_identifiers_are_bounded_and_path_independent() -> Result<(), Box<dyn Error>> {
+    for id in [
+        String::new(),
+        "has space".into(),
+        "a.b".into(),
+        "a/b".into(),
+        "é".into(),
+        "a".repeat(64),
+    ] {
+        assert!(refused(&POSTGRES.replace("test_1-a", &id)).contains("postgres.namespace"));
+        let encryption = format!(
+            "[credential_encryption]\nactive_key_id = \"{id}\"\nkeys = {{ \"{id}\" = \"/missing\" }}\n"
+        );
+        assert!(refused(&encryption).contains("key IDs"));
+    }
+    let max_id = "a".repeat(63);
+    Proxy::new(Config::parse(
+        &format!("{MINIMAL}{}", POSTGRES.replace("test_1-a", &max_id)),
+        lookup,
+    )?)?;
+    let encryption = format!(
+        "[credential_encryption]\nactive_key_id = \"{max_id}\"\nkeys = {{ {max_id} = \"/missing\" }}\n"
+    );
+    Proxy::new(Config::parse(&format!("{MINIMAL}{encryption}"), lookup)?)?;
+    Ok(())
+}
+
+#[test]
+fn all_key_ids_paths_and_active_key_membership_are_validated() {
+    for keys in ["{}", "{ other = \"/missing\" }"] {
+        assert!(
+            refused(&format!(
+                "[credential_encryption]\nactive_key_id = \"a\"\nkeys = {keys}\n"
+            ))
+            .contains("must name an entry")
+        );
+    }
+    for keys in ["{ a = \"\" }", "{ a = \"/missing\", b = \"\" }"] {
+        assert!(
+            refused(&format!(
+                "[credential_encryption]\nactive_key_id = \"a\"\nkeys = {keys}\n"
+            ))
+            .contains("paths must not be empty")
+        );
+    }
+    assert!(refused("[credential_encryption]\nactive_key_id = \"a\"\nkeys = { a = \"/missing\", \"bad.id\" = \"/missing\" }\n").contains("key IDs"));
+}
+
+#[test]
+fn postgres_rejects_bad_urls_pool_sizes_and_timeouts() {
+    for url in [
+        "http://localhost/db",
+        "postgres://",
+        "not a url",
+        "postgres://localhost/db#fragment",
+        "postgres://localhost:bad/db",
+    ] {
+        assert!(
+            refused(&POSTGRES.replace("postgres://127.0.0.1:1/x", url)).contains("postgres.url")
+        );
+    }
+    assert!(refused(&format!("{POSTGRES}max_connections = 0\n")).contains("must be positive"));
+    for field in ["connect_timeout", "acquire_timeout"] {
+        for seconds in ["0s", "18446744073709551615s"] {
+            assert!(
+                refused(&format!("{POSTGRES}{field} = \"{seconds}\"\n"))
+                    .contains("positive, representable duration")
+            );
+        }
+        for seconds in ["2m", "-1s", "1.5s", "18446744073709551616s"] {
+            assert!(
+                refused(&format!("{POSTGRES}{field} = \"{seconds}\"\n")).contains("whole seconds")
+            );
+        }
+        assert!(refused(&format!("{POSTGRES}{field} = 10\n")).contains("invalid config"));
+    }
+}
+
+#[test]
+fn claude_rejects_unsafe_or_malformed_upstreams() {
+    for url in [
+        "ftp://localhost",
+        "not a url",
+        "http://",
+        "https://name:password@localhost",
+        "https://localhost?key=secret",
+        "https://localhost/#fragment",
+    ] {
+        assert!(
+            refused(&format!(
+                "{POSTGRES}{ENCRYPTION}{CLAUDE}upstream = \"{url}\"\n"
+            ))
+            .contains("claude.upstream must be an http(s) URL")
+        );
+    }
+}
+
+#[test]
+fn adapter_errors_and_postgres_debug_do_not_disclose_config_values() -> Result<(), Box<dyn Error>> {
+    const CANARY: &str = "config-redaction-canary";
+    let url = format!("postgres://user:{CANARY}@localhost/db");
+    for text in [
+        format!(
+            "{MINIMAL}[postgres]\nurl = \"{url}\"\nnamespace = \"ok\"\nmax_connections = \"{CANARY}\"\n"
+        ),
+        format!("{MINIMAL}[postgres]\nurl = \"{url}\" trailing\n"),
+        format!("{MINIMAL}[postgres]\nurl = \"{url}${{UNFINISHED\"\n"),
+        format!("{MINIMAL}[postgres]\nurl = \"{CANARY}\"\nnamespace = \"ok\"\n"),
+    ] {
+        let error = Config::parse(&text, lookup)
+            .err()
+            .ok_or("invalid config accepted")?;
+        assert!(!error.to_string().contains(CANARY));
+        assert!(!format!("{error:?}").contains(CANARY));
+    }
+    let config = Config::parse(
+        &format!(
+            "{MINIMAL}{}",
+            POSTGRES.replace("postgres://127.0.0.1:1/x", &url)
+        ),
+        lookup,
+    )?;
+    assert!(!format!("{:?}", config.postgres).contains(CANARY));
+    Ok(())
+}
+
+#[test]
+fn check_config_accepts_offline_adapter_and_rejects_reserved_prefix() -> Result<(), Box<dyn Error>>
+{
+    let text = format!(
+        "listen = \"127.0.0.1:0\"\nproxy_token = \"literal\"\n{POSTGRES}{ENCRYPTION}{CLAUDE}"
+    );
+    for (name, extra, code, expected) in [
+        ("offline-adapter", "", 0, ": ok"),
+        (
+            "offline-conflict",
+            "[[route]]\nname = \"claude\"\nupstream = \"http://localhost\"\n",
+            1,
+            "prefix /claude is reserved",
+        ),
+    ] {
+        let path = temp_config(name, &format!("{text}{extra}"));
+        let output = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
+            .arg("--check-config")
+            .arg(&path)
+            .output()?;
+        fs::remove_file(path)?;
+        assert_eq!(output.status.code(), Some(code));
+        let observed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(observed.contains(expected));
+        assert!(!observed.contains("postgres://"));
+        assert!(!observed.contains("/nonexistent/llmproxy-master-key"));
+    }
+    Ok(())
 }
