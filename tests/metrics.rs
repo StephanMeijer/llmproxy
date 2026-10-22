@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "metrics/shared_conflicts.rs"]
+mod shared_conflicts;
+
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use axum::Router;
@@ -50,6 +53,7 @@ fn exposes_metadata_without_inventing_unobserved_counts() {
         ("llm3_postgres_available", "gauge"),
         ("llm3_provider_credentials", "gauge"),
         ("llm3_credential_operations_total", "counter"),
+        ("llm3_shared_limit_conflicts_total", "counter"),
     ] {
         assert!(text.contains(&format!("# HELP {name} ")));
         assert!(text.contains(&format!("# TYPE {name} {kind}\n")));
