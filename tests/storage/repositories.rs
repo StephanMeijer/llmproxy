@@ -1,7 +1,7 @@
 use super::*;
 use llmproxy::storage::{
-    Lease, LimitKey, OwnerId, RateKind, RateState, ReservationId, StorageError, TokenId,
-    TokenRecord,
+    FencedLease, Lease, LimitKey, OwnerId, RateKind, RateState, ReservationId, StorageError,
+    TokenId, TokenRecord,
 };
 
 #[tokio::test]
@@ -132,7 +132,12 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     .await
     .unwrap();
     assert_eq!(tx.enqueue(&key, (&lease, LONG)).await.unwrap(), 1);
-    tx.insert_lease(&key, (&lease, LONG)).await.unwrap();
+    let fenced = FencedLease {
+        id: lease.id,
+        owner: lease.owner,
+        generation: 1,
+    };
+    assert!(tx.acquire_concurrency(&key, (&fenced, 1)).await.unwrap());
     tx.commit().await.unwrap();
     // When the complete authoritative state is locked and read.
     let mut tx = store.begin().await.unwrap();
@@ -142,8 +147,9 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     assert!(state.rates.first().unwrap().elapsed_microseconds >= 0);
     assert_eq!(state.waiters.first().unwrap().enqueue_order, 1);
     assert_eq!(state.leases.first().unwrap().owner, lease.owner);
-    assert!(tx.renew_lease(&lease, LONG).await.unwrap());
+    assert!(tx.renew_concurrency(&key, &fenced).await.unwrap());
     tx.release(&key, &lease).await.unwrap();
+    assert!(tx.release_concurrency(&key, &fenced).await.unwrap());
     tx.commit().await.unwrap();
     let mut tx = store.begin().await.unwrap();
     let state = tx.lock_limit(&key).await.unwrap();
@@ -168,13 +174,18 @@ async fn expired_leases_cannot_revive_and_reclaim_uses_database_time() {
     let mut tx = store.begin().await.unwrap();
     tx.put_limit(&key, &definition()).await.unwrap();
     tx.enqueue(&key, (&lease, Duration::ZERO)).await.unwrap();
-    tx.insert_lease(&key, (&lease, Duration::ZERO))
-        .await
-        .unwrap();
+    let fenced = FencedLease {
+        id: lease.id,
+        owner: lease.owner,
+        generation: 1,
+    };
+    assert!(tx.acquire_concurrency(&key, (&fenced, 1)).await.unwrap());
     tx.commit().await.unwrap();
+    sqlx::query("UPDATE concurrency_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1")
+        .bind(lease.id).execute(&db.pool).await.unwrap();
     // When renewal and cleanup execute on the server.
     let mut tx = store.begin().await.unwrap();
-    assert!(!tx.renew_lease(&lease, LONG).await.unwrap());
+    assert!(!tx.renew_concurrency(&key, &fenced).await.unwrap());
     tx.reclaim(&key).await.unwrap();
     tx.commit().await.unwrap();
     // Then expired rows are gone from durable state.

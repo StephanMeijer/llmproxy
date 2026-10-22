@@ -22,6 +22,41 @@ pub struct Lease {
 }
 
 impl StorageTransaction {
+    /// Reads the live queue head while retaining the definition and waiter locks.
+    /// # Errors
+    /// Returns a sanitized database error.
+    pub async fn waiter_head(&mut self, key: &LimitKey) -> Result<Option<Waiter>, StorageError> {
+        self.lock_definition(key).await?;
+        Ok(sqlx::query_as("SELECT id,owner,enqueue_order FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at>clock_timestamp() ORDER BY enqueue_order LIMIT 1 FOR UPDATE")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_optional(&mut *self.tx).await?)
+    }
+
+    /// Checks the caller's database-time deadline under the definition lock.
+    /// # Errors
+    /// Returns a sanitized database error.
+    pub async fn waiter_live(
+        &mut self,
+        key: &LimitKey,
+        lease: &Lease,
+    ) -> Result<bool, StorageError> {
+        self.lock_definition(key).await?;
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND id=$4 AND owner=$5 AND expires_at>clock_timestamp())")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).fetch_one(&mut *self.tx).await?)
+    }
+
+    /// Deletes an owned waiter; commit publishes the queue advancement notification.
+    /// # Errors
+    /// Returns a sanitized database error.
+    pub async fn remove_waiter(
+        &mut self,
+        key: &LimitKey,
+        lease: &Lease,
+    ) -> Result<(), StorageError> {
+        self.lock_definition(key).await?;
+        sqlx::query("DELETE FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND id=$4 AND owner=$5")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).execute(&mut *self.tx).await?;
+        Ok(())
+    }
     /// Adds a waiter in database-serialized FIFO order; TTL uses server time.
     /// # Errors
     /// Returns a sanitized constraint or database error.
@@ -37,72 +72,33 @@ impl StorageTransaction {
             .fetch_one(&mut *self.tx).await?)
     }
 
-    /// Adds an in-flight lease under the definition lock.
-    /// # Errors
-    /// Returns a sanitized constraint or database error.
-    pub async fn insert_lease(
-        &mut self,
-        key: &LimitKey,
-        reservation: (&Lease, Duration),
-    ) -> Result<(), StorageError> {
-        self.lock_definition(key).await?;
-        let (lease, ttl) = reservation;
-        sqlx::query("INSERT INTO concurrency_leases(namespace,person_id,provider,limit_name,id,owner,expires_at) VALUES ($1,$2,'anthropic',$3,$4,$5,clock_timestamp()+$6::bigint*interval '1 microsecond')")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).bind(microseconds(ttl)?)
-            .execute(&mut *self.tx).await?;
-        Ok(())
-    }
-
-    /// Refreshes a live lease owned by this replica; expired leases cannot revive.
-    /// # Errors
-    /// Returns a sanitized database error.
-    pub async fn renew_lease(
-        &mut self,
-        lease: &Lease,
-        ttl: Duration,
-    ) -> Result<bool, StorageError> {
-        Ok(sqlx::query("UPDATE concurrency_leases SET expires_at=clock_timestamp()+$4::bigint*interval '1 microsecond' WHERE namespace=$1 AND id=$2 AND owner=$3 AND expires_at>clock_timestamp()")
-            .bind(&self.namespace).bind(lease.id).bind(lease.owner).bind(microseconds(ttl)?).execute(&mut *self.tx).await?.rows_affected() == 1)
-    }
-
-    /// Removes only a reservation owned by the caller, from both queue and leases.
+    /// Removes only a waiter owned by the caller; leases require fenced release.
     /// # Errors
     /// Returns a sanitized database error.
     pub async fn release(&mut self, key: &LimitKey, lease: &Lease) -> Result<(), StorageError> {
-        self.lock_definition(key).await?;
-        for query in [
-            "DELETE FROM fifo_waiters WHERE namespace=$1 AND id=$2 AND owner=$3 AND person_id=$4 AND limit_name=$5 AND provider='anthropic'",
-            "DELETE FROM concurrency_leases WHERE namespace=$1 AND id=$2 AND owner=$3 AND person_id=$4 AND limit_name=$5 AND provider='anthropic'",
-        ] {
-            sqlx::query(query)
-                .bind(&self.namespace)
-                .bind(lease.id)
-                .bind(lease.owner)
-                .bind(key.person)
-                .bind(&key.name)
-                .execute(&mut *self.tx)
-                .await?;
-        }
-        Ok(())
+        self.remove_waiter(key, lease).await
     }
 
     /// Reclaims expired records according to `PostgreSQL` time under the limit lock.
     /// # Errors
     /// Returns a sanitized database error.
-    pub async fn reclaim(&mut self, key: &LimitKey) -> Result<(), StorageError> {
+    pub async fn reclaim(&mut self, key: &LimitKey) -> Result<bool, StorageError> {
         self.lock_definition(key).await?;
+        let mut changed = false;
         for query in [
             "DELETE FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at<=clock_timestamp()",
             "DELETE FROM concurrency_leases WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at<=clock_timestamp()",
         ] {
-            sqlx::query(query)
+            changed |= sqlx::query(query)
                 .bind(&self.namespace)
                 .bind(key.person)
                 .bind(&key.name)
                 .execute(&mut *self.tx)
-                .await?;
+                .await?
+                .rows_affected()
+                > 0;
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub(super) async fn waiters(&mut self, key: &LimitKey) -> Result<Vec<Waiter>, StorageError> {
