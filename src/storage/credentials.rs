@@ -2,6 +2,13 @@ use super::{PersonId, StorageError, StorageTransaction};
 use crate::secret::CredentialEnvelope;
 use sqlx::Row;
 
+#[path = "../credential/rotation.rs"]
+mod rotation;
+#[path = "../credential/service.rs"]
+mod service;
+pub use rotation::RotationCounts;
+pub use service::{CredentialSnapshot, CredentialVersion, Credentials};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialState {
     Active,
