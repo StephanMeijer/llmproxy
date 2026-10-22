@@ -10,11 +10,12 @@ use crate::{
         CompiledLimits, LeaseCancellations, PendingAdmission, SharedAdmissionError,
         SharedDefinition, SharedRateStore, SharedRequest,
     },
+    metrics::{CredentialMetrics, CredentialOperation, CredentialOutcome, CredentialProvider},
     secret::{KeyRing, SecretBytes},
-    storage::{Credentials, Storage, StorageError},
+    storage::{CredentialVersion, Credentials, Storage, StorageError},
 };
 use std::io::Read;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub(super) const MESSAGES_PATH: &str = "/claude/v1/messages";
 const KEY_BYTES: u64 = 32;
@@ -25,6 +26,7 @@ pub(super) struct Claude {
     postgres: PostgresConfig,
     encryption: CredentialEncryptionConfig,
     runtime: OnceLock<Result<(Credentials, SharedRateStore), StorageError>>,
+    refresh: tokio::sync::Mutex<()>,
 }
 
 impl Claude {
@@ -66,6 +68,7 @@ impl Claude {
                     keys: encryption.keys.clone(),
                 },
                 runtime: OnceLock::new(),
+                refresh: tokio::sync::Mutex::new(()),
             }),
             compiled.local,
         ))
@@ -74,10 +77,11 @@ impl Claude {
     fn runtime(
         &self,
         max_wait: std::time::Duration,
+        metrics: &Arc<CredentialMetrics>,
     ) -> &Result<(Credentials, SharedRateStore), StorageError> {
         self.runtime.get_or_init(|| {
             let encryption = &self.encryption;
-            let storage = Storage::new(&self.postgres)?;
+            let storage = Storage::new(&self.postgres)?.with_metrics(Arc::clone(metrics));
             let keys = KeyRing::load(&encryption.active_key_id, &encryption.keys)
                 .map_err(|_| StorageError::Unavailable)?;
             let mut fingerprint = Vec::new();
@@ -98,6 +102,7 @@ impl Claude {
     }
 
     pub(super) async fn forward(&self, proxy: &Proxy, parts: &Parts, body: Body) -> Response {
+        let metrics = proxy.metrics.credentials();
         let Ok(body) = to_bytes(body, proxy.max_body).await else {
             return error(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -108,10 +113,13 @@ impl Claude {
         let Some(Principal::Person(person)) = parts.extensions.get::<Principal>() else {
             return unavailable();
         };
-        let Ok((credentials, store)) = self.runtime(proxy.max_wait) else {
+        let Ok((credentials, store)) = self.runtime(proxy.max_wait, &proxy.metrics.credentials)
+        else {
             return unavailable();
         };
-        let Ok(snapshot) = credentials.snapshot(*person).await else {
+        let snapshot = credentials.snapshot(*person).await;
+        self.refresh_counts(credentials, metrics).await;
+        let Ok(snapshot) = snapshot else {
             return unavailable();
         };
         let Ok(mut key) = HeaderValue::from_bytes(snapshot.secret.expose()) else {
@@ -125,14 +133,7 @@ impl Claude {
                 "invalid upstream path",
             );
         };
-        let model = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("model")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            });
+        let model = request_model(&body);
         let queued = Instant::now();
         let waiting = Counted::new(&proxy.metrics.held);
         let admission = PendingAdmission::new(
@@ -150,7 +151,10 @@ impl Claude {
         let admission = match admission {
             Ok(admission) => admission,
             Err(SharedAdmissionError::QueueTimeout(_)) => return queue_timeout(proxy.max_wait),
-            Err(SharedAdmissionError::Storage(_)) => return unavailable(),
+            Err(SharedAdmissionError::Storage(_)) => {
+                self.refresh_counts(credentials, metrics).await;
+                return unavailable();
+            }
         };
         let queue_wait_ms = millis(queued.elapsed());
         let mut headers = request_headers(parts, &self.route);
@@ -177,13 +181,12 @@ impl Claude {
             Err(_) => return unavailable(),
         };
         if upstream.status() == StatusCode::UNAUTHORIZED {
-            match cancellation
-                .run(credentials.invalidate(snapshot.version))
-                .await
-            {
-                Ok(Ok(()) | Err(StorageError::Conflict)) => {}
-                Ok(Err(_)) => tracing::warn!("Claude credential invalidation unavailable"),
-                Err(_) => return unavailable(),
+            let result = cancellation
+                .run(invalidate(credentials, snapshot.version, metrics))
+                .await;
+            self.refresh_counts(credentials, metrics).await;
+            if result.is_err() {
+                return unavailable();
             }
         }
         relay_stream(
@@ -195,6 +198,49 @@ impl Claude {
             admission.stream(upstream.bytes_stream()),
         )
     }
+
+    async fn refresh_counts(&self, credentials: &Credentials, metrics: &CredentialMetrics) {
+        let _refresh = self.refresh.lock().await;
+        match credentials.counts().await {
+            Ok(counts) => {
+                metrics.set_credentials(CredentialProvider::Anthropic, counts);
+                metrics.set_postgres_available(true);
+            }
+            Err(_) => metrics.set_postgres_available(false),
+        }
+    }
+}
+
+fn request_model(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+}
+
+async fn invalidate(
+    credentials: &Credentials,
+    version: CredentialVersion,
+    metrics: &CredentialMetrics,
+) {
+    let outcome = match credentials.invalidate(version).await {
+        Ok(()) => CredentialOutcome::Success,
+        Err(StorageError::Conflict) => CredentialOutcome::Conflict,
+        Err(_) => {
+            metrics.set_postgres_available(false);
+            tracing::warn!("Claude credential invalidation unavailable");
+            CredentialOutcome::Unavailable
+        }
+    };
+    metrics.record_operation(
+        CredentialProvider::Anthropic,
+        CredentialOperation::Invalidate,
+        outcome,
+    );
 }
 
 fn unavailable() -> Response {

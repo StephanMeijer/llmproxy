@@ -1,6 +1,9 @@
 //! Route-aware authentication with local legacy authority and database person identity.
 
-use std::{num::NonZeroUsize, sync::OnceLock};
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, OnceLock},
+};
 
 use axum::http::{HeaderMap, StatusCode, header};
 
@@ -50,6 +53,7 @@ impl AuthError {
 
 /// Database connections are lazy; legacy requests never enter the database path.
 pub struct Authenticator {
+    pub(crate) metrics: Arc<crate::metrics::CredentialMetrics>,
     legacy: String,
     postgres: Option<PostgresConfig>,
     storage: OnceLock<Result<Storage, StorageError>>,
@@ -61,6 +65,7 @@ impl Authenticator {
     #[must_use]
     pub fn new(legacy: String, postgres: Option<&PostgresConfig>) -> Self {
         Self {
+            metrics: Arc::default(),
             legacy,
             postgres: postgres.map(|config| PostgresConfig {
                 url: config.url.clone(),
@@ -101,23 +106,31 @@ impl Authenticator {
             .get_or_init(|| Storage::new(postgres))
             .as_ref()
             .map_err(|_| AuthError::Unavailable)?;
-        let mut transaction = storage.begin().await.map_err(|_| AuthError::Unavailable)?;
+        let mut transaction = storage.begin().await.map_err(|_| {
+            self.metrics.set_postgres_available(false);
+            AuthError::Unavailable
+        })?;
         let record = transaction
             .token(TokenId(token.id()))
             .await
-            .map_err(|error| match error {
-                StorageError::NotFound => AuthError::Unauthorized,
-                StorageError::Unavailable
-                | StorageError::IncompatibleSchema
-                | StorageError::UnsupportedServer
-                | StorageError::MigrationFailed
-                | StorageError::Conflict
-                | StorageError::InvalidData => AuthError::Unavailable,
+            .map_err(|error| {
+                self.metrics
+                    .set_postgres_available(error == StorageError::NotFound);
+                match error {
+                    StorageError::NotFound => AuthError::Unauthorized,
+                    StorageError::Unavailable
+                    | StorageError::IncompatibleSchema
+                    | StorageError::UnsupportedServer
+                    | StorageError::MigrationFailed
+                    | StorageError::Conflict
+                    | StorageError::InvalidData => AuthError::Unavailable,
+                }
             })?;
-        transaction
-            .rollback()
-            .await
-            .map_err(|_| AuthError::Unavailable)?;
+        transaction.rollback().await.map_err(|_| {
+            self.metrics.set_postgres_available(false);
+            AuthError::Unavailable
+        })?;
+        self.metrics.set_postgres_available(true);
         if record.revoked || !record.person_enabled {
             return Err(AuthError::Unauthorized);
         }
