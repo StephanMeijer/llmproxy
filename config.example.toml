@@ -21,6 +21,7 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 # acquire_timeout = "10s"                # positive pool acquisition timeout; default 10s
 #
 # [credential_encryption]
+# fingerprint_key_file = "/run/secrets/llmproxy-fingerprint-key"
 # active_key_id = "primary"
 # keys = { primary = "/run/secrets/llmproxy-primary" } # mounted 32-byte master key; never inline key bytes
 #

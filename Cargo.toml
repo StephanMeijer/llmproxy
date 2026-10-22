@@ -5,6 +5,7 @@ edition = "2024"
 description = "Authenticated, rate-limited, fully configurable egress proxy for LLM provider APIs"
 
 [dependencies]
+rpassword = "=7.5.4"
 aes-gcm = { version = "=0.11.1", features = ["zeroize"] }
 argon2 = { version = "=0.6.0", features = ["zeroize"] }
 getrandom = { version = "=0.4.3", features = ["std"] }

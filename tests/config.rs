@@ -11,7 +11,7 @@ const MINIMAL: &str = "listen = \"127.0.0.1:0\"\nproxy_token = \"${TOKEN}\"\n";
 const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;
 const UNSET_VAR: &str = "LLMPROXY_TEST_SURELY_UNSET_VAR";
 const POSTGRES: &str = "[postgres]\nurl = \"postgres://127.0.0.1:1/x\"\nnamespace = \"test_1-a\"\n";
-const ENCRYPTION: &str = "[credential_encryption]\nactive_key_id = \"key_1-a\"\nkeys = { key_1-a = \"/nonexistent/llmproxy-master-key\" }\n";
+const ENCRYPTION: &str = "[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"key_1-a\"\nkeys = { key_1-a = \"/nonexistent/llmproxy-master-key\" }\n";
 const CLAUDE: &str = "[claude]\n";
 
 fn lookup(name: &str) -> Option<String> {
@@ -297,7 +297,7 @@ fn adapter_defaults_and_explicit_settings_are_offline() -> Result<(), Box<dyn Er
 fn adapter_environment_expansion_preserves_value_boundaries() -> Result<(), Box<dyn Error>> {
     let text = format!(
         "{MINIMAL}[postgres]\nurl = \"${{DB_URL}}\"\nnamespace = \"${{NAMESPACE}}\"\n\
-         [credential_encryption]\nactive_key_id = \"key_1-a\"\nkeys = {{ key_1-a = \"${{KEY_FILE}}\" }}\n\
+         [credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"key_1-a\"\nkeys = {{ key_1-a = \"${{KEY_FILE}}\" }}\n\
          [claude]\nupstream = \"${{UPSTREAM}}\"\n"
     );
     let config = Config::parse(&text, |name| match name {
@@ -370,7 +370,7 @@ fn adapter_unknown_fields_and_bad_types_are_rejected() {
         format!("{POSTGRES}{ENCRYPTION}{CLAUDE}upsteam = \"http://h\"\n"),
         format!("{POSTGRES}max_connections = \"bad\"\n"),
         format!("{POSTGRES}{ENCRYPTION}{CLAUDE}retry_429 = \"yes\"\n"),
-        "[credential_encryption]\nactive_key_id = \"a\"\nkeys = { a = 42 }\n".into(),
+        "[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"a\"\nkeys = { a = 42 }\n".into(),
     ] {
         assert!(refused(&extra).contains("invalid config"));
     }
@@ -388,7 +388,7 @@ fn namespace_and_key_identifiers_are_bounded_and_path_independent() -> Result<()
     ] {
         assert!(refused(&POSTGRES.replace("test_1-a", &id)).contains("postgres.namespace"));
         let encryption = format!(
-            "[credential_encryption]\nactive_key_id = \"{id}\"\nkeys = {{ \"{id}\" = \"/missing\" }}\n"
+            "[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"{id}\"\nkeys = {{ \"{id}\" = \"/missing\" }}\n"
         );
         assert!(refused(&encryption).contains("key IDs"));
     }
@@ -398,7 +398,7 @@ fn namespace_and_key_identifiers_are_bounded_and_path_independent() -> Result<()
         lookup,
     )?)?;
     let encryption = format!(
-        "[credential_encryption]\nactive_key_id = \"{max_id}\"\nkeys = {{ {max_id} = \"/missing\" }}\n"
+        "[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"{max_id}\"\nkeys = {{ {max_id} = \"/missing\" }}\n"
     );
     Proxy::new(Config::parse(&format!("{MINIMAL}{encryption}"), lookup)?)?;
     Ok(())
@@ -409,7 +409,7 @@ fn all_key_ids_paths_and_active_key_membership_are_validated() {
     for keys in ["{}", "{ other = \"/missing\" }"] {
         assert!(
             refused(&format!(
-                "[credential_encryption]\nactive_key_id = \"a\"\nkeys = {keys}\n"
+                "[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"a\"\nkeys = {keys}\n"
             ))
             .contains("must name an entry")
         );
@@ -417,12 +417,12 @@ fn all_key_ids_paths_and_active_key_membership_are_validated() {
     for keys in ["{ a = \"\" }", "{ a = \"/missing\", b = \"\" }"] {
         assert!(
             refused(&format!(
-                "[credential_encryption]\nactive_key_id = \"a\"\nkeys = {keys}\n"
+                "[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"a\"\nkeys = {keys}\n"
             ))
             .contains("paths must not be empty")
         );
     }
-    assert!(refused("[credential_encryption]\nactive_key_id = \"a\"\nkeys = { a = \"/missing\", \"bad.id\" = \"/missing\" }\n").contains("key IDs"));
+    assert!(refused("[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"a\"\nkeys = { a = \"/missing\", \"bad.id\" = \"/missing\" }\n").contains("key IDs"));
 }
 
 #[test]
