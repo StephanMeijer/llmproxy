@@ -96,6 +96,13 @@ impl AdmissionStore for SharedRateStore {
     type Lease = Option<LeaseGuard>;
     type Error = SharedAdmissionError;
 
+    async fn lease_lost(&self, leases: &[Self::Lease]) -> Self::Error {
+        super::super::LeaseCancellations::new(leases)
+            .cancelled()
+            .await;
+        SharedAdmissionError::Storage(StorageError::Unavailable)
+    }
+
     fn max_wait(&self) -> Option<Duration> {
         Some(self.max_wait)
     }

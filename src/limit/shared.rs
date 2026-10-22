@@ -7,7 +7,9 @@ mod concurrency;
 pub use accounting::{AccountingError, FixedBucket, UNITS_PER_TOKEN};
 pub use admission::{Admission, AdmissionStore, PendingAdmission, SharedCharge, SharedRequest};
 pub use admission::{SharedAdmissionError, SharedRateStore};
-pub use concurrency::{LeaseCancellation, LeaseGuard, LeaseLost, LeaseStreamError};
+pub use concurrency::{
+    LeaseCancellation, LeaseCancellations, LeaseGuard, LeaseLost, LeaseStreamError,
+};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
