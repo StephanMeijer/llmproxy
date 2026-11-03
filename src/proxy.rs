@@ -30,6 +30,7 @@ use crate::{
     config::{Config, ConfigError},
     limit::Limits,
     metrics::CredentialMetrics,
+    storage::Storage,
 };
 
 #[path = "claude.rs"]
@@ -344,6 +345,8 @@ impl Proxy {
     }
 
     /// Validates everything that is not plain syntax: route names, URLs, headers and limits.
+    /// Nothing is dialed, but with `[postgres]` set this must run inside a Tokio runtime
+    /// because the shared connection pool spawns its maintenance task at construction.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] naming the first invalid route or limit, or if the HTTP client
@@ -365,12 +368,21 @@ impl Proxy {
             .redirect(redirect::Policy::none())
             .build()
             .map_err(|e| ConfigError(format!("build http client: {e}")))?;
-        let (claude, limits) = claude::Claude::configure(&config)?;
-        let auth = Authenticator::new(config.proxy_token, config.postgres.as_ref());
+        // One storage per process: every pool, listener and the availability gauge are shared.
+        let storage = config
+            .postgres
+            .as_ref()
+            .map(Storage::new)
+            .transpose()
+            .map_err(|e| ConfigError(format!("postgres: {e}")))?;
         let metrics = Metrics {
-            credentials: Arc::clone(&auth.metrics),
+            credentials: storage
+                .as_ref()
+                .map_or_else(Arc::default, |storage| Arc::clone(storage.metrics())),
             ..Metrics::default()
         };
+        let (claude, limits) = claude::Claude::configure(&config, storage.clone())?;
+        let auth = Authenticator::new(config.proxy_token, storage);
         Ok(Self {
             auth,
             claude,

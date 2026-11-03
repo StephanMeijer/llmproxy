@@ -1,5 +1,5 @@
 use super::{StorageError, check_connection_schema};
-use crate::config::PostgresConfig;
+use crate::{config::PostgresConfig, metrics::CredentialMetrics};
 use sqlx::{
     ConnectOptions, PgPool, Postgres, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -9,7 +9,7 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 /// Lazy namespace-scoped database runtime. Construction never contacts `PostgreSQL`.
 #[derive(Clone)]
 pub struct Storage {
-    metrics: Option<Arc<crate::metrics::CredentialMetrics>>,
+    metrics: Arc<CredentialMetrics>,
     pub(super) pool: PgPool,
     pub(super) namespace: String,
     pub(super) timeout: Duration,
@@ -41,28 +41,27 @@ impl Storage {
                 options,
                 config.acquire_timeout.min(config.connect_timeout),
             )),
-            metrics: None,
+            metrics: Arc::default(),
             pool,
             namespace: config.namespace.clone(),
             timeout: config.acquire_timeout,
         })
     }
 
-    pub(crate) fn with_metrics(mut self, metrics: Arc<crate::metrics::CredentialMetrics>) -> Self {
-        self.metrics = Some(metrics);
-        self
-    }
-
-    pub(crate) fn observe_availability(&self, available: bool) {
-        if let Some(metrics) = &self.metrics {
-            metrics.set_postgres_available(available);
-        }
+    /// The metrics this runtime reports database availability to; share it with the renderer.
+    #[must_use]
+    pub const fn metrics(&self) -> &Arc<CredentialMetrics> {
+        &self.metrics
     }
 
     /// Opens a schema-checked transaction; dropping it rolls back its mutations.
     /// # Errors
     /// Returns a sanitized availability or compatibility error.
     pub async fn begin(&self) -> Result<StorageTransaction, StorageError> {
+        observe(&self.metrics, self.open().await)
+    }
+
+    async fn open(&self) -> Result<StorageTransaction, StorageError> {
         let mut tx = self.pool.begin().await?;
         let milliseconds = self.timeout.as_millis().to_string();
         sqlx::query("SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $1, true)")
@@ -71,6 +70,7 @@ impl Storage {
         Ok(StorageTransaction {
             tx,
             namespace: self.namespace.clone(),
+            metrics: Arc::clone(&self.metrics),
         })
     }
 
@@ -85,6 +85,7 @@ impl Storage {
 pub struct StorageTransaction {
     pub(super) tx: Transaction<'static, Postgres>,
     pub(super) namespace: String,
+    metrics: Arc<CredentialMetrics>,
 }
 
 impl StorageTransaction {
@@ -92,16 +93,34 @@ impl StorageTransaction {
     /// # Errors
     /// Returns a sanitized database failure. The caller must reread after ambiguity.
     pub async fn commit(mut self) -> Result<(), StorageError> {
-        sqlx::query("SELECT pg_notify('llmproxy_storage', '')")
-            .execute(&mut *self.tx)
-            .await?;
-        self.tx.commit().await.map_err(Into::into)
+        let result = async {
+            sqlx::query("SELECT pg_notify('llmproxy_storage', '')")
+                .execute(&mut *self.tx)
+                .await?;
+            self.tx.commit().await.map_err(Into::into)
+        }
+        .await;
+        observe(&self.metrics, result)
     }
 
     /// Explicitly rolls back an operation without producing a notification.
     /// # Errors
     /// Returns `Unavailable` when the database cannot acknowledge rollback.
     pub async fn rollback(self) -> Result<(), StorageError> {
-        self.tx.rollback().await.map_err(Into::into)
+        let result = self.tx.rollback().await.map_err(Into::into);
+        observe(&self.metrics, result)
     }
+}
+
+/// A completed round trip proves availability; only an outage disproves it.
+fn observe<T>(
+    metrics: &CredentialMetrics,
+    result: Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    match &result {
+        Ok(_) => metrics.set_postgres_available(true),
+        Err(error) if error.is_outage() => metrics.set_postgres_available(false),
+        Err(_) => {}
+    }
+    result
 }

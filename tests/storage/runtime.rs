@@ -1,6 +1,21 @@
 use super::*;
 use llmproxy::storage::{ChangeListener, StorageError};
 
+#[test]
+fn only_database_failures_count_as_outages() {
+    for (error, outage) in [
+        (StorageError::Unavailable, true),
+        (StorageError::IncompatibleSchema, true),
+        (StorageError::UnsupportedServer, true),
+        (StorageError::MigrationFailed, true),
+        (StorageError::Conflict, false),
+        (StorageError::InvalidData, false),
+        (StorageError::NotFound, false),
+    ] {
+        assert_eq!(error.is_outage(), outage, "{error}");
+    }
+}
+
 #[tokio::test]
 async fn row_lock_serializes_two_pools() {
     // Given a row locked by one pool.

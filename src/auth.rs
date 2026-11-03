@@ -1,14 +1,10 @@
 //! Route-aware authentication with local legacy authority and database person identity.
 
-use std::{
-    num::NonZeroUsize,
-    sync::{Arc, OnceLock},
-};
+use std::num::NonZeroUsize;
 
 use axum::http::{HeaderMap, StatusCode, header};
 
 use crate::{
-    config::PostgresConfig,
     secret::{ProxyToken, TokenHasher},
     storage::{PersonId, Storage, StorageError, TokenId},
 };
@@ -53,28 +49,18 @@ impl AuthError {
 
 /// Database connections are lazy; legacy requests never enter the database path.
 pub struct Authenticator {
-    pub(crate) metrics: Arc<crate::metrics::CredentialMetrics>,
     legacy: String,
-    postgres: Option<PostgresConfig>,
-    storage: OnceLock<Result<Storage, StorageError>>,
+    storage: Option<Storage>,
     hasher: TokenHasher,
 }
 
 impl Authenticator {
-    /// Builds local authority and an optional lazy personal-token verifier.
+    /// Builds local authority and, given the process's shared storage, a personal-token verifier.
     #[must_use]
-    pub fn new(legacy: String, postgres: Option<&PostgresConfig>) -> Self {
+    pub fn new(legacy: String, storage: Option<Storage>) -> Self {
         Self {
-            metrics: Arc::default(),
             legacy,
-            postgres: postgres.map(|config| PostgresConfig {
-                url: config.url.clone(),
-                namespace: config.namespace.clone(),
-                max_connections: config.max_connections,
-                connect_timeout: config.connect_timeout,
-                acquire_timeout: config.acquire_timeout,
-            }),
-            storage: OnceLock::new(),
+            storage,
             hasher: TokenHasher::new(NonZeroUsize::MIN),
         }
     }
@@ -100,37 +86,19 @@ impl Authenticator {
             };
         }
         let token = ProxyToken::parse(token).map_err(|_| AuthError::Unauthorized)?;
-        let postgres = self.postgres.as_ref().ok_or(AuthError::Unavailable)?;
-        let storage = self
-            .storage
-            .get_or_init(|| Storage::new(postgres))
-            .as_ref()
-            .map_err(|_| AuthError::Unavailable)?;
-        let mut transaction = storage.begin().await.map_err(|_| {
-            self.metrics.set_postgres_available(false);
-            AuthError::Unavailable
-        })?;
+        let storage = self.storage.as_ref().ok_or(AuthError::Unavailable)?;
+        let mut transaction = storage.begin().await.map_err(|_| AuthError::Unavailable)?;
         let record = transaction
             .token(TokenId(token.id()))
             .await
-            .map_err(|error| {
-                self.metrics
-                    .set_postgres_available(error == StorageError::NotFound);
-                match error {
-                    StorageError::NotFound => AuthError::Unauthorized,
-                    StorageError::Unavailable
-                    | StorageError::IncompatibleSchema
-                    | StorageError::UnsupportedServer
-                    | StorageError::MigrationFailed
-                    | StorageError::Conflict
-                    | StorageError::InvalidData => AuthError::Unavailable,
-                }
+            .map_err(|error| match error {
+                StorageError::NotFound => AuthError::Unauthorized,
+                _ => AuthError::Unavailable,
             })?;
-        transaction.rollback().await.map_err(|_| {
-            self.metrics.set_postgres_available(false);
-            AuthError::Unavailable
-        })?;
-        self.metrics.set_postgres_available(true);
+        transaction
+            .rollback()
+            .await
+            .map_err(|_| AuthError::Unavailable)?;
         if record.revoked || !record.person_enabled {
             return Err(AuthError::Unauthorized);
         }

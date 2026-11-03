@@ -255,8 +255,9 @@ fn refuses_limits_that_match_or_limit_nothing() {
     assert!(why.contains("limit x: set `model` or `prefixes`"), "{why}");
 }
 
-#[test]
-fn adapter_sections_are_optional_and_independently_validated() -> Result<(), Box<dyn Error>> {
+// A proxy with `[postgres]` creates its pool at construction, which needs a Tokio runtime.
+#[tokio::test]
+async fn adapter_sections_are_optional_and_independently_validated() -> Result<(), Box<dyn Error>> {
     for extra in [String::new(), POSTGRES.into(), ENCRYPTION.into()] {
         let config = Config::parse(&format!("{MINIMAL}{extra}"), lookup)?;
         assert!(config.claude.is_none());
@@ -265,8 +266,9 @@ fn adapter_sections_are_optional_and_independently_validated() -> Result<(), Box
     Ok(())
 }
 
-#[test]
-fn adapter_defaults_and_explicit_settings_are_offline() -> Result<(), Box<dyn Error>> {
+// A proxy with `[postgres]` creates its pool at construction, which needs a Tokio runtime.
+#[tokio::test]
+async fn adapter_defaults_and_explicit_settings_are_offline() -> Result<(), Box<dyn Error>> {
     let config = Config::parse(&format!("{MINIMAL}{POSTGRES}{ENCRYPTION}{CLAUDE}"), lookup)?;
     let postgres = config.postgres.as_ref().ok_or("missing postgres")?;
     assert_eq!(postgres.max_connections, 10);
@@ -293,8 +295,9 @@ fn adapter_defaults_and_explicit_settings_are_offline() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-#[test]
-fn adapter_environment_expansion_preserves_value_boundaries() -> Result<(), Box<dyn Error>> {
+// A proxy with `[postgres]` creates its pool at construction, which needs a Tokio runtime.
+#[tokio::test]
+async fn adapter_environment_expansion_preserves_value_boundaries() -> Result<(), Box<dyn Error>> {
     let text = format!(
         "{MINIMAL}[postgres]\nurl = \"${{DB_URL}}\"\nnamespace = \"${{NAMESPACE}}\"\n\
          [credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id = \"key_1-a\"\nkeys = {{ key_1-a = \"${{KEY_FILE}}\" }}\n\
@@ -332,8 +335,9 @@ fn claude_requires_both_storage_and_encryption() {
     }
 }
 
-#[test]
-fn claude_reserves_only_its_enabled_static_route_name() -> Result<(), Box<dyn Error>> {
+// A proxy with `[postgres]` creates its pool at construction, which needs a Tokio runtime.
+#[tokio::test]
+async fn claude_reserves_only_its_enabled_static_route_name() -> Result<(), Box<dyn Error>> {
     let route = "[[route]]\nname = \"claude\"\nupstream = \"http://localhost\"\n";
     assert!(
         refused(&format!("{POSTGRES}{ENCRYPTION}{CLAUDE}{route}"))
@@ -376,8 +380,10 @@ fn adapter_unknown_fields_and_bad_types_are_rejected() {
     }
 }
 
-#[test]
-fn namespace_and_key_identifiers_are_bounded_and_path_independent() -> Result<(), Box<dyn Error>> {
+// A proxy with `[postgres]` creates its pool at construction, which needs a Tokio runtime.
+#[tokio::test]
+async fn namespace_and_key_identifiers_are_bounded_and_path_independent()
+-> Result<(), Box<dyn Error>> {
     for id in [
         String::new(),
         "has space".into(),
