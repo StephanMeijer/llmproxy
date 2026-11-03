@@ -26,6 +26,7 @@ use tokio::{
 };
 
 use crate::{
+    auth::{AuthError, Authenticator, RouteKind},
     config::{Config, ConfigError},
     limit::Limits,
     metrics::CredentialMetrics,
@@ -34,7 +35,6 @@ use crate::{
 const HEALTH_PATH: &str = "/healthz";
 const METRICS_PATH: &str = "/metrics";
 const CHAT_COMPLETIONS_SUFFIX: &str = "/chat/completions";
-const BEARER_PREFIX: &str = "Bearer ";
 const API_KEY_HEADER: &str = "x-api-key";
 /// Token estimate for limits: body bytes / 4.
 const BYTES_PER_TOKEN: usize = 4;
@@ -323,7 +323,8 @@ impl Drop for Timed {
 }
 
 pub struct Proxy {
-    token: String,
+    auth: Authenticator,
+    claude_enabled: bool,
     max_wait: Duration,
     max_body: usize,
     tool_choice_prefix: Option<String>,
@@ -362,7 +363,8 @@ impl Proxy {
             .build()
             .map_err(|e| ConfigError(format!("build http client: {e}")))?;
         Ok(Self {
-            token: config.proxy_token,
+            auth: Authenticator::new(config.proxy_token, config.postgres.as_ref()),
+            claude_enabled: config.claude.is_some(),
             max_wait: config.max_wait,
             max_body: config.max_body,
             tool_choice_prefix: config.tool_choice_prefix,
@@ -373,40 +375,52 @@ impl Proxy {
         })
     }
 
-    fn authorized(&self, headers: &HeaderMap) -> bool {
-        let bearer = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix(BEARER_PREFIX));
-        let api_key = headers.get(API_KEY_HEADER).and_then(|v| v.to_str().ok());
-        [bearer, api_key]
-            .into_iter()
-            .flatten()
-            .any(|t| constant_time_eq(t.as_bytes(), self.token.as_bytes()))
-    }
-
     /// Returns the metric label and the response.
     async fn serve(&self, req: Request) -> (&str, Response) {
-        let (parts, body) = req.into_parts();
+        let (mut parts, body) = req.into_parts();
         let path = parts.uri.path();
         if path == HEALTH_PATH {
             return (LABEL_HEALTHZ, (StatusCode::OK, "ok").into_response());
         }
-        if !self.authorized(&parts.headers) {
+        let matched = self
+            .routes
+            .iter()
+            .find_map(|r| Some((r, path.strip_prefix(&r.prefix)?)));
+        let kind = if self.claude_enabled && (path == "/claude" || path.starts_with("/claude/")) {
+            RouteKind::Claude
+        } else if matched.is_some() {
+            RouteKind::Static
+        } else {
+            RouteKind::Unknown
+        };
+        match self.auth.authenticate(kind, &parts.headers).await {
+            Ok(Some(principal)) => {
+                parts.extensions.insert(principal);
+            }
+            Ok(None) => {}
+            Err(failure) => {
+                let kind = match failure {
+                    AuthError::Unauthorized => "unauthorized",
+                    AuthError::Forbidden => "forbidden",
+                    AuthError::Unavailable => "authentication_unavailable",
+                };
+                return (
+                    LABEL_OTHER,
+                    error(failure.status(), kind, "proxy authentication failed"),
+                );
+            }
+        }
+        if kind == RouteKind::Claude {
             return (
-                LABEL_OTHER,
+                "claude",
                 error(
-                    StatusCode::UNAUTHORIZED,
-                    "unauthorized",
-                    "missing or invalid proxy token",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "adapter_unavailable",
+                    "Claude adapter unavailable",
                 ),
             );
         }
-        let Some((route, rest)) = self
-            .routes
-            .iter()
-            .find_map(|r| Some((r, path.strip_prefix(&r.prefix)?)))
-        else {
+        let Some((route, rest)) = matched else {
             return (
                 LABEL_OTHER,
                 error(
@@ -641,10 +655,6 @@ fn insert_tool_choice(body: &mut Value) -> bool {
 /// Whole milliseconds as `u64`, which logs and headers render as a number.
 fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 fn error(status: StatusCode, kind: &str, message: &str) -> Response {
