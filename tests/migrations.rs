@@ -40,7 +40,7 @@ async fn concurrent_cli_migrations_are_idempotent() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     storage::check_schema(&db.pool).await.unwrap();
     db.close().await;
 }

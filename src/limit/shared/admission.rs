@@ -1,9 +1,15 @@
 //! Ordered, single-charge admission independent of the persistence implementation.
 
 use std::future::Future;
+use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::SharedDefinition;
+
+#[path = "rate_runtime.rs"]
+mod rate_runtime;
+pub use rate_runtime::{SharedAdmissionError, SharedRateStore};
 
 const BYTES_PER_TOKEN: usize = 4;
 
@@ -12,6 +18,18 @@ const BYTES_PER_TOKEN: usize = 4;
 pub trait AdmissionStore: Sync {
     type Lease: Send;
     type Error;
+
+    fn max_wait(&self) -> Option<Duration> {
+        None
+    }
+
+    fn acquire_with_remaining(
+        &self,
+        charge: SharedCharge<'_>,
+        _remaining: Option<Duration>,
+    ) -> impl Future<Output = Result<Self::Lease, Self::Error>> + Send {
+        self.acquire(charge)
+    }
 
     fn acquire(
         &self,
@@ -55,10 +73,14 @@ impl<'a> PendingAdmission<'a> {
         store: &S,
     ) -> Result<Admission<S::Lease>, S::Error> {
         let mut leases = Vec::with_capacity(self.charges.len());
+        let started = Instant::now();
         for charge in self.charges {
-            leases.push(store.acquire(charge).await?);
+            let remaining = store
+                .max_wait()
+                .map(|wait| wait.saturating_sub(started.elapsed()));
+            leases.push(store.acquire_with_remaining(charge, remaining).await?);
         }
-        Ok(Admission { _leases: leases })
+        Ok(Admission { leases })
     }
 }
 
@@ -73,5 +95,12 @@ pub struct SharedRequest<'a> {
 /// Keep alive through the response stream and every retry; no recharging API exists.
 #[must_use]
 pub struct Admission<L> {
-    _leases: Vec<L>,
+    leases: Vec<L>,
+}
+
+impl<L> Admission<L> {
+    #[must_use]
+    pub fn leases(&self) -> &[L] {
+        &self.leases
+    }
 }

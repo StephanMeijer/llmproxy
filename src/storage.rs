@@ -9,6 +9,7 @@ use sqlx::{
 use crate::config::PostgresConfig;
 
 mod credentials;
+mod leases;
 mod limits;
 mod listener;
 mod people;
@@ -18,6 +19,7 @@ pub use credentials::{
     CredentialRecord, CredentialSnapshot, CredentialState, CredentialVersion, Credentials,
     RotationCounts,
 };
+pub use leases::{FencedLease, LEASE_LIFETIME};
 pub use limits::{LimitKey, LimitSnapshot, RateKind, RateState};
 pub use listener::ChangeListener;
 pub use people::{Person, PersonId, TokenId, TokenRecord};

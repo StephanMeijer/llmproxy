@@ -1,6 +1,9 @@
 use super::{Lease, PersonId, StorageError, StorageTransaction, Waiter};
 use crate::limit::shared::SharedDefinition;
 
+#[path = "rate.rs"]
+mod rate;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LimitKey {
     pub person: PersonId,
