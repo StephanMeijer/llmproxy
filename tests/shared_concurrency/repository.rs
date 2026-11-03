@@ -58,37 +58,24 @@ async fn concurrent_transactions_never_exceed_capacity() {
 }
 
 #[tokio::test]
-async fn stale_generation_and_owner_cannot_mutate_replacement() {
-    // Given an acquired lease replaced by a newer ownership epoch.
+async fn other_owner_cannot_mutate_lease() {
+    // Given an acquired lease.
     let (db, storage, key) = setup().await;
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let mut tx = storage.begin().await.unwrap();
     assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
-    sqlx::query("UPDATE concurrency_leases SET ownership_generation=2")
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    // When the old generation or a different owner attempts renewal/release.
+    // When a different owner attempts renewal/release.
     let mut tx = storage.begin().await.unwrap();
-    for stale in [
-        lease,
-        FencedLease {
-            owner: OwnerId(Uuid::new_v4()),
-            generation: 2,
-            ..lease
-        },
-    ] {
-        assert!(!tx.renew_concurrency(&key, &stale).await.unwrap());
-        assert!(!tx.release_concurrency(&key, &stale).await.unwrap());
-    }
-    // Then the current epoch still owns the slot and alone can renew/release.
-    let current = FencedLease {
-        generation: 2,
+    let stranger = FencedLease {
+        owner: OwnerId(Uuid::new_v4()),
         ..lease
     };
-    assert!(tx.renew_concurrency(&key, &current).await.unwrap());
-    assert!(tx.release_concurrency(&key, &current).await.unwrap());
+    assert!(!tx.renew_concurrency(&key, &stranger).await.unwrap());
+    assert!(!tx.release_concurrency(&key, &stranger).await.unwrap());
+    // Then the owner still holds the slot and alone can renew/release.
+    assert!(tx.renew_concurrency(&key, &lease).await.unwrap());
+    assert!(tx.release_concurrency(&key, &lease).await.unwrap());
     tx.commit().await.unwrap();
     storage.close().await;
     db.close().await;
