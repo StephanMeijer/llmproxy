@@ -170,14 +170,15 @@ impl Claude {
             .await;
         let (upstream, retries) = match result {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => {
+            Ok(Err(e)) => {
+                tracing::warn!(route = "claude", error = %e, "upstream request failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
                     "upstream_error",
                     "upstream request failed",
                 );
             }
-            Err(_) => return unavailable(),
+            Err(_) => return lease_lost(),
         };
         if upstream.status() == StatusCode::UNAUTHORIZED {
             let result = cancellation
@@ -235,6 +236,14 @@ async fn invalidate(
         CredentialOperation::Invalidate,
         outcome,
     );
+}
+
+fn lease_lost() -> Response {
+    tracing::warn!(
+        route = "claude",
+        "concurrency lease lost during upstream request"
+    );
+    unavailable()
 }
 
 fn unavailable() -> Response {

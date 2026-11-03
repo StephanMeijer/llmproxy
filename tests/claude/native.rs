@@ -25,6 +25,14 @@ async fn upstream_connection_failure_returns_502_and_releases_leases() {
     // Then the proxy returns502 and releases its admitted concurrency.
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     f.state_count("concurrency_leases", 0).await;
+    // And the operator can see why in the log, as for static routes.
+    let log = std::fs::read_to_string(&a.log).unwrap();
+    assert!(
+        log.lines()
+            .any(|line| line.contains("upstream request failed")
+                && line.contains("\"route\":\"claude\"")),
+        "{log}"
+    );
     artifact(
         "upstream-failure.txt",
         "PASS stopped provider listener returns502; admitted lease released; sanitized response/log\n",
