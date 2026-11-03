@@ -93,11 +93,11 @@ async fn lost_commit_acknowledgement_preserves_committed_credential_and_retry_sa
     let mut f = Fixture::new("commit-ack-loss").await;
     let a = f.binary("").await;
     let b = f.binary("").await;
-    let mut bridge = Bridge::new(&f.db.url).await;
+    let mut bridge = Bridge::new(&f.db.config.url).await;
     let config = f.db.directory.join("fault-operator.toml");
     let text = std::fs::read_to_string(&f.config)
         .unwrap()
-        .replace(&f.db.url, &bridge.url);
+        .replace(&f.db.config.url, &bridge.url);
     std::fs::write(&config, text).unwrap();
     let person = f.people.first().unwrap().clone();
     // When the server commits replacement but the operator receives no acknowledgement.

@@ -2,8 +2,10 @@
 
 #[path = "shared_rate/budgets.rs"]
 mod budgets;
-#[path = "migrations/support.rs"]
+#[path = "common/database.rs"]
 mod database;
+#[path = "common/database_close.rs"]
+mod database_close;
 #[path = "shared_rate/deadline.rs"]
 mod deadline;
 #[path = "shared_rate/deadline_bounds.rs"]

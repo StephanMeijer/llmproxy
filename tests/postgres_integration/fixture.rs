@@ -4,7 +4,8 @@ use super::{
     provider::{Hit, Provider},
 };
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use sqlx::AssertSqlSafe;
+use std::{fs, path::PathBuf, time::Duration};
 
 pub const ALICE: &str = "fake-integration-alice-canary";
 pub const BOB: &str = "fake-integration-bob-canary";
@@ -75,7 +76,7 @@ impl Fixture {
     fn config_text(&self, listen: &str, limits: &str) -> String {
         format!(
             "listen='{listen}'\nproxy_token='legacy'\nmax_wait='40s'\n[postgres]\nurl='{}'\nnamespace='{}'\nacquire_timeout='1s'\nconnect_timeout='1s'\n[credential_encryption]\nactive_key_id='old'\nfingerprint_key_file='{}'\nkeys={{old='{}',new='{}'}}\n[claude]\nupstream='{}'\n[[route]]\nname='static'\nupstream='{}'\n{limits}",
-            self.db.url,
+            self.db.config.url,
             self.db.name,
             self.db.directory.join("fingerprint").display(),
             self.db.directory.join("old").display(),
@@ -194,5 +195,42 @@ impl Drop for Fixture {
             self.closed || std::thread::panicking(),
             "Fixture dropped without close(): process logs were not scanned for secrets"
         );
+    }
+}
+
+impl Database {
+    pub async fn available(&self, enabled: bool) {
+        sqlx::query(AssertSqlSafe(format!(
+            "ALTER DATABASE {} ALLOW_CONNECTIONS {enabled}",
+            self.name
+        )))
+        .execute(&self.admin)
+        .await
+        .unwrap();
+        if !enabled {
+            sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1")
+                .bind(&self.name)
+                .execute(&self.admin)
+                .await
+                .unwrap();
+        }
+    }
+
+    pub async fn count(&self, table: &str, expected: i64) {
+        let query = format!("SELECT count(*) FROM {table}");
+        tokio::time::timeout(super::WAIT, async {
+            loop {
+                let count: i64 = sqlx::query_scalar(AssertSqlSafe(query.as_str()))
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap();
+                if count == expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("observed SQL count never reached expected state");
     }
 }
