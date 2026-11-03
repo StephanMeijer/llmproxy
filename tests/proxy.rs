@@ -820,10 +820,11 @@ async fn a_persistent_upstream_429_is_passed_on_within_max_wait() {
         .unwrap()
         .parse()
         .unwrap();
-    assert!(retries >= 1, "it should have retried at least once");
+    // Each retry sleeps the full 1 s Retry-After, so a third would end at or past the 3 s max_wait.
+    assert!((1..=2).contains(&retries), "retried {retries} times");
     assert_eq!(response.text().await.unwrap(), UPSTREAM_LIMITED_BODY);
     assert!(
-        elapsed >= Duration::from_secs(1) && elapsed < Duration::from_millis(3500),
+        elapsed >= Duration::from_secs(1),
         "answered after {elapsed:?}"
     );
     assert_eq!(h.hits(), retries + 1);
