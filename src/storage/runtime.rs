@@ -71,6 +71,7 @@ impl Storage {
             tx,
             namespace: self.namespace.clone(),
             metrics: Arc::clone(&self.metrics),
+            locked: None,
         })
     }
 
@@ -86,6 +87,9 @@ pub struct StorageTransaction {
     pub(super) tx: Transaction<'static, Postgres>,
     pub(super) namespace: String,
     metrics: Arc<CredentialMetrics>,
+    /// The limit definition row this transaction already holds `FOR UPDATE`; row locks last until
+    /// commit or rollback, so locking it again would only cost a round trip.
+    pub(super) locked: Option<super::LimitKey>,
 }
 
 impl StorageTransaction {
