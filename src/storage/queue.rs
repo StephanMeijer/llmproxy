@@ -63,10 +63,10 @@ impl StorageTransaction {
     pub async fn enqueue(
         &mut self,
         key: &LimitKey,
-        reservation: (&Lease, Duration),
+        lease: &Lease,
+        ttl: Duration,
     ) -> Result<i64, StorageError> {
         self.lock_definition(key).await?;
-        let (lease, ttl) = reservation;
         Ok(sqlx::query_scalar("INSERT INTO fifo_waiters(namespace,person_id,provider,limit_name,id,owner,expires_at) VALUES ($1,$2,'anthropic',$3,$4,$5,clock_timestamp()+$6::bigint*interval '1 microsecond') RETURNING enqueue_order")
             .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).bind(microseconds(ttl)?)
             .fetch_one(&mut *self.tx).await?)

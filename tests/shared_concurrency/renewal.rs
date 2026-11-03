@@ -10,7 +10,7 @@ async fn renewal_serializes_with_capacity_and_checks_expiry_after_lock_wait() {
     let (db, storage, key) = setup().await;
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let mut tx = storage.begin().await.unwrap();
-    assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
     sqlx::query(
         "UPDATE concurrency_leases SET expires_at=clock_timestamp()+interval '200 milliseconds'",
@@ -47,7 +47,7 @@ async fn database_rejected_renewal_retries_and_rejected_release_leaves_row_to_ex
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let started = tokio::time::Instant::now();
     let mut tx = storage.begin().await.unwrap();
-    assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
     for statement in [
         "CREATE FUNCTION llmproxy_test_reject() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'rejected by test' USING ERRCODE='23514'; END $$",
@@ -64,7 +64,7 @@ async fn database_rejected_renewal_retries_and_rejected_release_leaves_row_to_ex
         .unwrap()
     };
     let initial = expires_at().await;
-    let guard = LeaseGuard::start(storage.clone(), (key.clone(), lease), started);
+    let guard = LeaseGuard::start(storage.clone(), key.clone(), lease, started);
     // When the first renewal is rejected.
     tokio::time::sleep_until(started + Duration::from_secs(11)).await;
     assert_eq!(

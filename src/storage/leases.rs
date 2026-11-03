@@ -34,9 +34,9 @@ impl StorageTransaction {
     pub async fn acquire_concurrency(
         &mut self,
         key: &LimitKey,
-        reservation: (&FencedLease, usize),
+        lease: &FencedLease,
+        maximum: usize,
     ) -> Result<bool, StorageError> {
-        let (lease, maximum) = reservation;
         let maximum = i64::try_from(maximum).map_err(|_| StorageError::InvalidData)?;
         if maximum == 0 || lease.generation <= 0 {
             return Err(StorageError::InvalidData);

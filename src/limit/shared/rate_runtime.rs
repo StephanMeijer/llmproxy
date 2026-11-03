@@ -129,10 +129,8 @@ impl AdmissionStore for SharedRateStore {
             tx.put_limit(&queued.key, charge.definition).await?;
             tx.enqueue(
                 &queued.key,
-                (
-                    &queued.reservation,
-                    max_wait.saturating_sub(enqueue_started.elapsed()),
-                ),
+                &queued.reservation,
+                max_wait.saturating_sub(enqueue_started.elapsed()),
             )
             .await?;
             tx.commit().await?;
@@ -152,7 +150,7 @@ impl AdmissionStore for SharedRateStore {
                     && let Some(states) = tx.prepare_rates(&queued.key, charge).await?
                 {
                     let concurrency = match charge.definition.max_inflight() {
-                        Some(max) => tx.acquire_concurrency(&queued.key, (&fenced, max)).await?,
+                        Some(max) => tx.acquire_concurrency(&queued.key, &fenced, max).await?,
                         None => true,
                     };
                     if concurrency {
@@ -165,7 +163,8 @@ impl AdmissionStore for SharedRateStore {
                         let guard = charge.definition.max_inflight().map(|_| {
                             LeaseGuard::start(
                                 self.storage.clone(),
-                                (queued.key.clone(), fenced),
+                                queued.key.clone(),
+                                fenced,
                                 started,
                             )
                         });
