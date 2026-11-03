@@ -133,28 +133,39 @@ pub async fn check_schema(pool: &PgPool) -> Result<(), StorageError> {
         .acquire()
         .await
         .map_err(|_| StorageError::Unavailable)?;
-    check_connection_schema(&mut connection).await
+    check_connection_schema(&mut connection, None).await
 }
 
-async fn check_connection_schema(connection: &mut PgConnection) -> Result<(), StorageError> {
-    check_server(connection).await?;
-    let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+/// Checks the server and applied migrations in one round trip, optionally setting this
+/// transaction's statement and lock timeouts (in milliseconds) in the same statement.
+/// A missing `_sqlx_migrations` table fails the whole statement with `42P01`: `IncompatibleSchema`.
+async fn check_connection_schema(
+    connection: &mut PgConnection,
+    timeout: Option<&str>,
+) -> Result<(), StorageError> {
+    let (version, versions, successes, checksums): (i32, Vec<i64>, Vec<bool>, Vec<Vec<u8>>) =
+        sqlx::query_as(
+            "SELECT current_setting('server_version_num')::integer, \
+             coalesce(array_agg(version ORDER BY version), '{}'), \
+             coalesce(array_agg(success ORDER BY version), '{}'), \
+             coalesce(array_agg(checksum ORDER BY version), '{}'), \
+             set_config('statement_timeout', coalesce($1, current_setting('statement_timeout')), true), \
+             set_config('lock_timeout', coalesce($1, current_setting('lock_timeout')), true) \
+             FROM _sqlx_migrations",
+        )
+        .bind(timeout)
         .fetch_one(&mut *connection)
-        .await
-        .map_err(|_| StorageError::Unavailable)?;
-    if !exists {
-        return Err(StorageError::IncompatibleSchema);
+        .await?;
+    if version < MIN_POSTGRES_VERSION {
+        return Err(StorageError::UnsupportedServer);
     }
-    let applied: Vec<(i64, bool, Vec<u8>)> =
-        sqlx::query_as("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(|_| StorageError::Unavailable)?;
-    if applied.len() != MIGRATOR.iter().count()
-        || applied
+    if versions.len() != MIGRATOR.iter().count()
+        || versions
             .iter()
+            .zip(&successes)
+            .zip(&checksums)
             .zip(MIGRATOR.iter())
-            .any(|((version, success, checksum), migration)| {
+            .any(|(((version, success), checksum), migration)| {
                 !success
                     || *version != migration.version
                     || checksum.as_slice() != migration.checksum.as_ref()

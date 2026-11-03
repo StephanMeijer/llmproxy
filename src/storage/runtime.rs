@@ -64,9 +64,7 @@ impl Storage {
     async fn open(&self) -> Result<StorageTransaction, StorageError> {
         let mut tx = self.pool.begin().await?;
         let milliseconds = self.timeout.as_millis().to_string();
-        sqlx::query("SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $1, true)")
-            .bind(milliseconds).execute(&mut *tx).await?;
-        check_connection_schema(&mut tx).await?;
+        check_connection_schema(&mut tx, Some(&milliseconds)).await?;
         Ok(StorageTransaction {
             tx,
             namespace: self.namespace.clone(),
