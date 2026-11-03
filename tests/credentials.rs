@@ -6,6 +6,8 @@ mod database;
 mod disabled;
 #[path = "credentials/lifecycle.rs"]
 mod lifecycle;
+#[path = "common/pg_dump.rs"]
+mod pg_dump;
 #[path = "credentials/rotation.rs"]
 mod rotation;
 #[path = "credentials/rotation_failure.rs"]

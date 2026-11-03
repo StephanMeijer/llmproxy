@@ -14,6 +14,8 @@ mod heartbeat_metrics;
 mod lifecycle;
 #[path = "claude/native.rs"]
 mod native;
+#[path = "common/pg_dump.rs"]
+mod pg_dump;
 #[path = "claude/runtime_metrics.rs"]
 mod runtime_metrics;
 #[path = "claude/support.rs"]
