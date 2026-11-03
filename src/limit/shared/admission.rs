@@ -16,8 +16,12 @@ const BYTES_PER_TOKEN: usize = 4;
 /// Store implementations atomically acquire both budgets and a concurrency lease.
 /// The lease must release concurrency on Drop, including cancellation, but never refund rates.
 pub trait AdmissionStore: Sync {
-    type Lease: Send;
+    type Lease: Send + Sync;
     type Error;
+
+    fn lease_lost(&self, _leases: &[Self::Lease]) -> impl Future<Output = Self::Error> + Send {
+        std::future::pending()
+    }
 
     fn max_wait(&self) -> Option<Duration> {
         None
@@ -78,7 +82,11 @@ impl<'a> PendingAdmission<'a> {
             let remaining = store
                 .max_wait()
                 .map(|wait| wait.saturating_sub(started.elapsed()));
-            leases.push(store.acquire_with_remaining(charge, remaining).await?);
+            let lease = tokio::select! { biased;
+                error = store.lease_lost(&leases) => return Err(error),
+                lease = store.acquire_with_remaining(charge, remaining) => lease?,
+            };
+            leases.push(lease);
         }
         Ok(Admission { leases })
     }

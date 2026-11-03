@@ -93,7 +93,14 @@ async fn route_token_database_matrix_preserves_person_identity() {
                 };
                 let status = expected.map_or_else(|error| error.status().as_u16(), |_| success);
                 let response = client
-                    .get(format!("{base}{path}"))
+                    .request(
+                        if route == RouteKind::Claude {
+                            reqwest::Method::POST
+                        } else {
+                            reqwest::Method::GET
+                        },
+                        format!("{base}{path}"),
+                    )
                     .headers(headers)
                     .send()
                     .await

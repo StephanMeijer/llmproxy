@@ -26,6 +26,21 @@ pub struct Credentials {
 }
 
 impl Credentials {
+    /// Invalidates only the generation rejected by the provider.
+    /// # Errors
+    /// Returns a storage error, including `Conflict` if replacement won the race.
+    pub async fn invalidate(&self, version: CredentialVersion) -> Result<(), StorageError> {
+        let mut tx = self.storage.begin().await?;
+        tx.set_credential_state(&CredentialRecord {
+            person: version.person,
+            generation: version.generation,
+            state: CredentialState::Invalid,
+            envelope: None,
+        })
+        .await?;
+        tx.commit().await
+    }
+
     /// Keep the fingerprint key stable across encryption-key rotations and replicas.
     #[must_use]
     pub const fn new(storage: Storage, keys: KeyRing, fingerprint_key: SecretBytes) -> Self {
