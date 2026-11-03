@@ -88,6 +88,7 @@ impl fmt::Debug for PostgresConfig {
 #[serde(deny_unknown_fields)]
 pub struct CredentialEncryptionConfig {
     pub active_key_id: String,
+    pub fingerprint_key_file: PathBuf,
     pub keys: BTreeMap<String, PathBuf>,
 }
 
@@ -285,6 +286,11 @@ impl PostgresConfig {
 
 impl CredentialEncryptionConfig {
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.fingerprint_key_file.as_os_str().is_empty() {
+            return Err(ConfigError(
+                "credential_encryption.fingerprint_key_file must not be empty".into(),
+            ));
+        }
         if !valid_identifier(&self.active_key_id)
             || self.keys.keys().any(|id| !valid_identifier(id))
         {
