@@ -46,9 +46,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-audit
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # Fails on any RustSec advisory, including unmaintained and yanked crates, in Cargo.lock.
+      - run: cargo audit --deny warnings
       - name: Check PostgreSQL and Docker readiness
         env:
           LLMPROXY_CREDENTIAL_CONTAINER: ${{ job.services.postgres.id }}
