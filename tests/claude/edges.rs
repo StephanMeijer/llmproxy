@@ -13,7 +13,7 @@ async fn invalid_fingerprint_file_fails_closed_until_it_is_fixed() {
         f.request(&a, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     // When the key file is fixed in place, the next request loads it without a restart.
     std::fs::write(&pepper, [2; 32]).unwrap();
     let request = tokio::spawn(f.request(&a, false).send());
@@ -74,6 +74,6 @@ async fn stored_credential_with_header_control_bytes_never_reaches_provider() {
         f.request(&a, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     f.close(vec![a]).await;
 }

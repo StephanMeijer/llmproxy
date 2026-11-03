@@ -14,7 +14,7 @@ async fn committed_fifo_crosses_replicas_and_disconnect_releases_capacity() {
     let b = f.binary(super::LIMIT).await;
     let mut clients = JoinSet::new();
     clients.spawn(f.request(&a, 0).send());
-    let send = stream(f.hit().await);
+    let (send, _) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: held\n\n"))
         .await
         .unwrap();
@@ -80,7 +80,7 @@ async fn killed_stream_owner_is_reclaimed_only_after_database_expiry() {
     let b = f.binary(super::LIMIT).await;
     let mut clients = JoinSet::new();
     clients.spawn(f.request(&a, 0).send());
-    let send = stream(f.hit().await);
+    let (send, _) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: held\n\n"))
         .await
         .unwrap();
@@ -205,7 +205,7 @@ async fn cancelled_waiter_is_removed_without_provider_dispatch() {
     let b = f.binary(super::LIMIT).await;
     let mut clients = JoinSet::new();
     clients.spawn(f.request(&a, 0).send());
-    let send = stream(f.hit().await);
+    let (send, _) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: held\n\n"))
         .await
         .unwrap();

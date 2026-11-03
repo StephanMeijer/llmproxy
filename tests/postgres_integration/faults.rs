@@ -14,7 +14,7 @@ async fn database_outage_cancels_renewal_and_recovers_while_static_continues() {
     let b = f.binary(super::LIMIT).await;
     let mut clients = JoinSet::new();
     clients.spawn(f.request(&a, 0).send());
-    let send = stream(f.hit().await);
+    let (send, _) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: held\n\n"))
         .await
         .unwrap();
@@ -120,7 +120,7 @@ async fn terminated_waiter_expires_and_live_waiter_advances() {
     let mut b = f.binary(super::LIMIT).await;
     let mut clients = JoinSet::new();
     clients.spawn(f.request(&a, 0).send());
-    let send = stream(f.hit().await);
+    let (send, _) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: held\n\n"))
         .await
         .unwrap();

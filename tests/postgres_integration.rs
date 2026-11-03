@@ -16,7 +16,7 @@ mod fixture;
 mod lifecycle;
 #[path = "postgres_integration/process.rs"]
 mod process;
-#[path = "postgres_integration/provider.rs"]
+#[path = "common/fake_provider.rs"]
 mod provider;
 #[path = "postgres_integration/server_crash.rs"]
 mod server_crash;

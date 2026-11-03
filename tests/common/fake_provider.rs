@@ -1,18 +1,20 @@
 use axum::{
     body::{Body, Bytes, to_bytes},
     extract::Request,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
+use std::sync::Arc;
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot},
     task::JoinSet,
 };
 
 pub struct Hit {
+    pub path: String,
+    pub headers: HeaderMap,
     pub body: Bytes,
-    pub key: Vec<u8>,
     pub reply: oneshot::Sender<Response>,
 }
 
@@ -23,7 +25,8 @@ pub struct Provider {
 }
 
 impl Provider {
-    pub async fn new() -> Self {
+    /// With `static_ok`, paths other than `/v1/messages` answer "static-ok" without a hit.
+    pub async fn new(static_ok: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (send, hits) = mpsc::channel(32);
@@ -32,16 +35,17 @@ impl Provider {
             let router = axum::Router::new().fallback(move |request: Request| {
                 let send = send.clone();
                 async move {
-                    if request.uri().path() != "/v1/messages" {
-                        return Response::new(Body::from("static-ok"));
-                    }
                     let (parts, body) = request.into_parts();
                     let (reply, response) = oneshot::channel();
                     let hit = Hit {
+                        path: parts.uri.to_string(),
+                        headers: parts.headers,
                         body: to_bytes(body, 1024 * 1024).await.unwrap(),
-                        key: parts.headers.get("x-api-key").unwrap().as_bytes().to_vec(),
                         reply,
                     };
+                    if static_ok && hit.path.split('?').next() != Some("/v1/messages") {
+                        return Response::new(Body::from("static-ok"));
+                    }
                     if send.send(hit).await.is_err() {
                         return Response::new(Body::empty());
                     }
@@ -67,26 +71,37 @@ impl Provider {
     }
 }
 
+/// Answers with `request-id` (asserted by the Claude suite) and `retry-after: 0` (so a 429 retries at once).
 pub fn reply(hit: Hit, status: StatusCode, body: &'static str) {
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert("retry-after", "0".parse().unwrap());
+    let headers = response.headers_mut();
+    headers.insert("request-id", "provider-request".parse().unwrap());
+    headers.insert("retry-after", "0".parse().unwrap());
     assert!(hit.reply.send(response).is_ok());
 }
 
-pub fn stream(hit: Hit) -> mpsc::Sender<Bytes> {
+struct Dropped(Arc<Notify>);
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+/// Streams the chunks sent on the returned channel; the `Notify` fires once the body is dropped.
+pub fn stream(hit: Hit) -> (mpsc::Sender<Bytes>, Arc<Notify>) {
     let (send, recv) = mpsc::channel(1);
-    let body = futures_util::stream::unfold(recv, |mut recv| async move {
+    let dropped = Arc::new(Notify::new());
+    let guard = Dropped(Arc::clone(&dropped));
+    let body = futures_util::stream::unfold((recv, guard), |(mut recv, guard)| async move {
         recv.recv()
             .await
-            .map(|bytes| (Ok::<_, std::io::Error>(bytes), recv))
+            .map(|bytes| (Ok::<_, std::io::Error>(bytes), (recv, guard)))
     });
     let mut response = Response::new(Body::from_stream(body));
     response
         .headers_mut()
         .insert("content-type", "text/event-stream".parse().unwrap());
     assert!(hit.reply.send(response).is_ok());
-    send
+    (send, dropped)
 }
