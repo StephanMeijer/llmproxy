@@ -120,11 +120,12 @@ async fn repositories_reject_invalid_state_changes_and_report_conflicts() {
         StorageError::Conflict,
         StorageError::InvalidData,
         StorageError::NotFound,
+        StorageError::Encryption,
     ]
     .iter()
     .map(ToString::to_string)
     .collect();
-    assert_eq!(messages.len(), 7);
+    assert_eq!(messages.len(), 8);
     store.close().await;
     db.close().await;
 }

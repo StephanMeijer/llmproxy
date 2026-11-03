@@ -127,7 +127,8 @@ impl Credentials {
 
     /// Captures the current active generation for one admitted request.
     /// # Errors
-    /// Missing, invalid, removed, wrong-key and missing-key credentials are unavailable.
+    /// Missing, invalid and removed credentials are `Unavailable`; wrong or missing keys are
+    /// `Encryption`.
     /// Decryption failure never mutates the durable row.
     pub async fn snapshot(&self, person: PersonId) -> Result<CredentialSnapshot, StorageError> {
         let mut tx = self.storage.begin().await?;
@@ -145,7 +146,7 @@ impl Credentials {
         let secret = self
             .keys
             .decrypt(&self.context(person), &envelope)
-            .map_err(|_| StorageError::Unavailable)?;
+            .map_err(|_| StorageError::Encryption)?;
         tx.rollback().await?;
         Ok(CredentialSnapshot {
             version: CredentialVersion {
@@ -164,9 +165,9 @@ impl Credentials {
         let envelope = self
             .keys
             .encrypt(&self.context(version.person), secret)
-            .map_err(|_| StorageError::Unavailable)?;
+            .map_err(|_| StorageError::Encryption)?;
         let fingerprint = credential_fingerprint(&self.fingerprint_key, secret)
-            .map_err(|_| StorageError::Unavailable)?;
+            .map_err(|_| StorageError::Encryption)?;
         Ok((
             CredentialRecord {
                 person: version.person,

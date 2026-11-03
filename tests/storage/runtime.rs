@@ -11,6 +11,7 @@ fn only_database_failures_count_as_outages() {
         (StorageError::Conflict, false),
         (StorageError::InvalidData, false),
         (StorageError::NotFound, false),
+        (StorageError::Encryption, false),
     ] {
         assert_eq!(error.is_outage(), outage, "{error}");
     }

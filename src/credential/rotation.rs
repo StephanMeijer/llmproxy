@@ -16,13 +16,13 @@ impl Storage {
     /// Load the old and new keys on every replica before rotating; switch writers to
     /// the target key before removing old files. A zero reference count is required.
     /// # Errors
-    /// Wrong/missing keys return `Unavailable`; the failing row remains untouched.
+    /// Wrong/missing keys return `Encryption`; the failing row remains untouched.
     pub async fn reencrypt_credentials(
         &self,
         config: &CredentialEncryptionConfig,
         target: &str,
     ) -> Result<RotationCounts, StorageError> {
-        let keys = KeyRing::load(target, &config.keys).map_err(|_| StorageError::Unavailable)?;
+        let keys = KeyRing::load(target, &config.keys).map_err(|_| StorageError::Encryption)?;
         let mut counts = RotationCounts::default();
         loop {
             let mut tx = self.begin().await?;
@@ -51,7 +51,7 @@ impl Storage {
             };
             let envelope = keys
                 .reencrypt(&context, &source)
-                .map_err(|_| StorageError::Unavailable)?;
+                .map_err(|_| StorageError::Encryption)?;
             sqlx::query("UPDATE provider_credentials SET format_version=$3,key_id=$4,nonce=$5,ciphertext=$6 WHERE namespace=$1 AND person_id=$2 AND provider='anthropic'")
                 .bind(&self.namespace).bind(person).bind(i32::from(envelope.version)).bind(&envelope.key_id)
                 .bind(envelope.nonce.as_slice()).bind(&envelope.ciphertext).execute(&mut *tx.tx).await?;

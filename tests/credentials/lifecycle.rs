@@ -82,7 +82,7 @@ async fn duplicate_key_is_rejected_across_people_and_dump_contains_no_plaintext(
 }
 
 #[tokio::test]
-async fn wrong_and_missing_keys_return_redacted_unavailable_without_row_changes() {
+async fn wrong_and_missing_keys_return_redacted_encryption_errors_without_row_changes() {
     // Given a valid durable credential.
     let (db, store, alice, _) = setup().await;
     let correct = service(&store, ring("old", &[("old", 1)]));
@@ -98,7 +98,7 @@ async fn wrong_and_missing_keys_return_redacted_unavailable_without_row_changes(
     // When reading through wrong and missing key-ring snapshots.
     for keys in [ring("old", &[("old", 3)]), ring("new", &[("new", 2)])] {
         let error = service(&store, keys).snapshot(alice).await.unwrap_err();
-        assert_eq!(error, StorageError::Unavailable);
+        assert_eq!(error, StorageError::Encryption);
         assert!(!format!("{error} {error:?}").contains(std::str::from_utf8(ALICE).unwrap()));
     }
     // Then ciphertext and generation remain intact and the correct key still decrypts.

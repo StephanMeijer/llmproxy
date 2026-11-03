@@ -12,7 +12,7 @@ async fn invalid_fingerprint_key_prevents_installation() {
         credentials
             .install(alice, &SecretBytes::new(ALICE.to_vec()))
             .await,
-        Err(StorageError::Unavailable)
+        Err(StorageError::Encryption)
     );
     let mut tx = store.begin().await.unwrap();
     assert!(tx.credential(alice).await.unwrap().is_none());
