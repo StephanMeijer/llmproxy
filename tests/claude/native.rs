@@ -20,8 +20,19 @@ async fn upstream_connection_failure_returns_502_and_releases_leases() {
         )
         .await;
     f.stop_upstream().await;
-    // When Claude attempts the upstream connection.
-    let response = f.request(&a, false).send().await.unwrap();
+    // When Claude attempts the upstream connection, with a query string the log must not keep.
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/claude/v1/messages?canary=query-string-canary",
+            a.base
+        ))
+        .bearer_auth(f.alice.expose())
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .body(BODY)
+        .send()
+        .await
+        .unwrap();
     // Then the proxy returns502 and releases its admitted concurrency.
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     f.state_count("concurrency_leases", 0).await;
@@ -33,6 +44,7 @@ async fn upstream_connection_failure_returns_502_and_releases_leases() {
                 && line.contains("\"route\":\"claude\"")),
         "{log}"
     );
+    assert!(!log.contains("query-string-canary"), "{log}");
     artifact(
         "upstream-failure.txt",
         "PASS stopped provider listener returns502; admitted lease released; sanitized response/log\n",

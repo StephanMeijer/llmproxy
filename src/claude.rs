@@ -171,7 +171,8 @@ impl Claude {
         let (upstream, retries) = match result {
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
-                tracing::warn!(route = "claude", error = %e, "upstream request failed");
+                // without_url: the URL carries the client's query string, which is never logged.
+                tracing::warn!(route = "claude", error = %e.without_url(), "upstream request failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
                     "upstream_error",
