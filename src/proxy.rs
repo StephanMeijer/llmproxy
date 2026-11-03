@@ -382,7 +382,7 @@ impl Proxy {
             ..Metrics::default()
         };
         let (claude, limits) = claude::Claude::configure(&config, storage.clone())?;
-        let auth = Authenticator::new(config.proxy_token, storage);
+        let auth = Authenticator::new(config.proxy_token, storage, config.max_wait);
         Ok(Self {
             auth,
             claude,

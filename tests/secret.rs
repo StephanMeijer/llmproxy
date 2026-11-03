@@ -2,7 +2,7 @@ use llmproxy::secret::{
     CredentialContext, KeyRing, ProxyToken, SecretBytes, SecretError, TokenHasher,
     credential_fingerprint, lookup_tag,
 };
-use std::{collections::BTreeMap, num::NonZeroUsize};
+use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -74,6 +74,31 @@ async fn secret_rejects_malformed_or_unbounded_hash_parameters() -> TestResult {
             Err(SecretError::InvalidHash)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_waiting_hasher_gives_up_after_its_wait() -> TestResult {
+    // Given one worker slot held by a hash that cannot start (the only blocking thread is busy).
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()?;
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    runtime.block_on(async {
+        let hasher = TokenHasher::new(NonZeroUsize::MIN).waiting(Duration::from_millis(50));
+        let token = ProxyToken::generate()?;
+        let blocker = tokio::task::spawn_blocking(move || release_rx.recv());
+        let mut holding = Box::pin(hasher.hash(&token));
+        assert!(futures_util::poll!(&mut holding).is_pending());
+        // When a second caller waits longer than allowed.
+        // Then it is told the verifier is busy instead of waiting forever.
+        assert_eq!(hasher.hash(&token).await, Err(SecretError::Busy));
+        release_tx.send(())?;
+        blocker.await??;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    runtime.shutdown_timeout(Duration::from_secs(10));
     Ok(())
 }
 

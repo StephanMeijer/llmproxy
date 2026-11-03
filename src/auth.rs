@@ -1,6 +1,6 @@
 //! Route-aware authentication with local legacy authority and database person identity.
 
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, thread, time::Duration};
 
 use axum::http::{HeaderMap, StatusCode, header};
 
@@ -56,12 +56,14 @@ pub struct Authenticator {
 
 impl Authenticator {
     /// Builds local authority and, given the process's shared storage, a personal-token verifier.
+    /// Verifications run one per CPU; a request waits up to `max_wait` for one to free up.
     #[must_use]
-    pub fn new(legacy: String, storage: Option<Storage>) -> Self {
+    pub fn new(legacy: String, storage: Option<Storage>, max_wait: Duration) -> Self {
+        let workers = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
         Self {
             legacy,
             storage,
-            hasher: TokenHasher::new(NonZeroUsize::MIN),
+            hasher: TokenHasher::new(workers).waiting(max_wait),
         }
     }
 
