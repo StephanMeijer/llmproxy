@@ -123,3 +123,50 @@ async fn conflicting_replica_fails_closed_before_enqueue() {
     f.waiters(0).await;
     f.close().await;
 }
+
+#[tokio::test]
+async fn definition_is_put_once_per_process_and_conflicts_still_fail_closed() {
+    // Given a store that already admitted once, after which the stored definition diverges.
+    let f = Fixture::new().await;
+    let d = definition("rpm=10");
+    let store = f.replica(false, LONG);
+    store.acquire(charge(&d, f.alice, 0)).await.unwrap();
+    sqlx::query("UPDATE limit_definitions SET config = config || '{\"probe\":1}'")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    // When the same store admits again, it skips put_limit and never sees the divergence.
+    store.acquire(charge(&d, f.alice, 0)).await.unwrap();
+    // Then a process that has not put the definition yet still fails closed.
+    assert!(matches!(
+        f.replica(true, LONG).acquire(charge(&d, f.alice, 0)).await,
+        Err(SharedAdmissionError::Storage(StorageError::Conflict))
+    ));
+    f.waiters(0).await;
+    f.close().await;
+}
+
+#[tokio::test]
+async fn cached_definition_is_put_again_when_its_row_disappears() {
+    // Given a store that cached its definition, whose row is then removed.
+    let f = Fixture::new().await;
+    let d = definition("rpm=10");
+    let store = f.replica(false, LONG);
+    store.acquire(charge(&d, f.alice, 0)).await.unwrap();
+    sqlx::query("DELETE FROM rate_state")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM limit_definitions")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    // When it admits again, then it re-puts the definition instead of failing with NotFound.
+    store.acquire(charge(&d, f.alice, 0)).await.unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM limit_definitions")
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+    f.close().await;
+}

@@ -1,7 +1,7 @@
 use super::{StorageError, StorageTransaction};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, sqlx::Type)]
 #[sqlx(transparent)]
 pub struct PersonId(pub Uuid);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
