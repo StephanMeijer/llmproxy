@@ -155,4 +155,5 @@ async fn lost_commit_acknowledgement_preserves_committed_credential_and_retry_sa
     assert_eq!(again.get("rewritten").unwrap(), 0);
     bridge.tasks.shutdown().await;
     f.record(json!({"suppressed_frame":"CommandComplete(COMMIT)","operator_exit_success":false,"committed_generation":generation,"replica_statuses":[200,200],"second_rotation_rewritten":0})).await;
+    f.close(vec![a, b]);
 }

@@ -81,6 +81,7 @@ async fn provisioning_rotation_restart_preserve_native_tools_and_sse() {
     f.static_ok(&restarted).await;
     assert_eq!(f.order, ["alice", "bob", "replacement"]);
     f.record(json!({"json_status":200,"sse_first_before_close":true,"rotation_rewritten":2,"restart_status":200})).await;
+    f.close(vec![b, restarted]);
 }
 
 #[tokio::test]
@@ -164,4 +165,5 @@ async fn provider_errors_invalid_credentials_retry_and_replacement_are_isolated(
     );
     assert!(f.provider.hits.try_recv().is_err());
     f.record(json!({"old_401_replacement_survived":true,"retry_count":1,"invalid_current_status":503,"bob_after_403":200})).await;
+    f.close(vec![a, b]);
 }

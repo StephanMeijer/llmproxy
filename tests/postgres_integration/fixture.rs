@@ -173,13 +173,10 @@ impl Fixture {
         )
         .unwrap();
     }
-}
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            return;
-        }
+    /// Stops the replicas, then fails the test if any process log contains a secret.
+    pub fn close(self, replicas: Vec<Replica>) {
+        drop(replicas);
         for entry in fs::read_dir(&self.db.directory).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|e| e == "log") {
