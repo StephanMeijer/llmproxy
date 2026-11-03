@@ -1,4 +1,6 @@
 use super::support::{Fixture, LEGACY};
+#[path = "../common/shutdown.rs"]
+mod shutdown;
 use std::time::Duration;
 
 pub async fn binary_scenario() {
@@ -95,8 +97,7 @@ pub async fn binary_scenario() {
         .unwrap();
     assert_eq!(response.status().as_u16(), 401);
     println!("binary database=down conflicting_headers status=401 pass");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    shutdown::stop(&mut child);
     scan_log(&log_path, &fixture);
     upstream_task.abort();
     fixture.close().await;

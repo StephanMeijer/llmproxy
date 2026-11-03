@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../common/shutdown.rs"]
+mod shutdown;
 use axum::{Router, body::Body, extract::State, response::Response, routing::get};
 use futures_util::StreamExt;
 use llmproxy::limit::shared::{AdmissionStore, SharedCharge, SharedRateStore};
@@ -69,9 +71,7 @@ impl Replica {
 
 impl Drop for Replica {
     fn drop(&mut self) {
-        if self.child.try_wait().unwrap().is_none() {
-            self.kill();
-        }
+        shutdown::stop(&mut self.child);
         fs::remove_dir_all(&self.directory).unwrap();
     }
 }
@@ -110,7 +110,14 @@ pub async fn child() {
         format!("http://{}", listener.local_addr().unwrap()),
     )
     .unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let mut terminate =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            terminate.recv().await;
+        })
+        .await
+        .unwrap();
 }
 
 async fn hold(State(state): State<ChildState>) -> Response {

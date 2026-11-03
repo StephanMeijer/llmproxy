@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../common/shutdown.rs"]
+mod shutdown;
 use llmproxy::{
     config::PostgresConfig,
     storage::{ChangeListener, StorageError},
@@ -35,8 +37,7 @@ impl Drop for Container {
 struct Server(Child);
 impl Drop for Server {
     fn drop(&mut self) {
-        self.0.kill().unwrap();
-        self.0.wait().unwrap();
+        shutdown::stop(&mut self.0);
     }
 }
 

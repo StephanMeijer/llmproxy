@@ -61,6 +61,8 @@ async fn secret_rejects_malformed_or_unbounded_hash_parameters() -> TestResult {
     let hash = hasher.hash(&token).await?;
     for invalid in [
         "bad".to_owned(),
+        "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            .to_owned(),
         hash.replace("m=19456", "m=4294967295"),
         hash.replace("t=2", "t=4294967295"),
         hash.replace("p=1", "p=4294967295"),
