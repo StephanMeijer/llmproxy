@@ -50,12 +50,21 @@ impl<'a> Command<'a> {
             ["auth", "person", "disable", id] => Self::Person(PersonId(Uuid::parse_str(id)?), true),
             ["auth", "token", "issue", id] => Self::Issue(PersonId(Uuid::parse_str(id)?)),
             ["auth", "token", "revoke", id] => Self::Revoke(TokenId(Uuid::parse_str(id)?)),
-            ["auth", "claude", "set", id] => Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Set(false)),
-            ["auth", "claude", "set", id, "--credential-stdin"] => Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Set(true)),
-            ["auth", "claude", "remove", id] => Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Remove),
-            ["auth", "claude", "status", id] => Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Status),
-            ["auth", "credentials", "reencrypt", "--to", target] => Self::Reencrypt(target),
-            _ => return Err("usage: llmproxy auth person create <label>|disable|status <person-id>; auth token issue <person-id>|revoke <token-id>; auth claude set|remove|status <person-id> [--credential-stdin]; auth credentials reencrypt --to <key-id> (config: LLMPROXY_CONFIG)".into()),
+            ["auth", "claude", "set", id] => {
+                Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Set(false))
+            }
+            ["auth", "claude", "set", id, "--credential-stdin"] => {
+                Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Set(true))
+            }
+            ["auth", "claude", "remove", id] => {
+                Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Remove)
+            }
+            ["auth", "claude", "status", id] => {
+                Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Status)
+            }
+            ["auth", "credentials", "reencrypt", "--to", target]
+            | ["credentials", "reencrypt", "--to", target] => Self::Reencrypt(target),
+            _ => return Err(super::help::USAGE.into()),
         })
     }
 }

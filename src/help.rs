@@ -14,7 +14,7 @@ Usage:
   llmproxy auth claude status <person-id>
   llmproxy auth claude remove <person-id>
   llmproxy auth credentials reencrypt --to <key-id>
-  llmproxy credentials reencrypt --to <key-id>
+  llmproxy credentials reencrypt --to <key-id>   (alias of the auth command)
 
 Configuration defaults to LLMPROXY_CONFIG, then /etc/llmproxy/config.toml.
 Auth and reencrypt commands use that configuration; they take no config argument.

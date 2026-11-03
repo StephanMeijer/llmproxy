@@ -67,7 +67,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
         .output()
         .unwrap();
     assert!(restarted.status.success());
-    assert_eq!(restarted.stdout, b"rewritten=1 remaining=0\n");
+    assert_eq!(restarted.stdout, b"{\"rewritten\":1,\"remaining\":0}\n");
     // Then only the new key is referenced, both secrets survive, and another run is a no-op.
     assert_eq!(store.credential_key_references("old").await.unwrap(), 0);
     assert_eq!(store.credential_key_references("new").await.unwrap(), 2);

@@ -31,14 +31,14 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         print!("{}", help::USAGE);
         return Ok(());
     }
-    if args.first().is_some_and(|arg| arg == "auth") {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "auth" || arg == "credentials")
+    {
         return operator::run(&args).await;
     }
     if args.first().is_some_and(|arg| arg == "db") {
         return migrate(&args).await;
-    }
-    if args.first().is_some_and(|arg| arg == "credentials") {
-        return reencrypt(&args).await;
     }
     let (check_only, path) = match args.as_slice() {
         [] => (false, None),
@@ -96,32 +96,6 @@ async fn migrate(args: &[String]) -> Result<(), Box<dyn Error + Send + Sync>> {
         .ok_or("db migrate requires [postgres] configuration")?;
     storage::migrate(postgres).await?;
     println!("database migrations: ok");
-    Ok(())
-}
-
-async fn reencrypt(args: &[String]) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let target = match args {
-        [_, command, flag, target] if command == "reencrypt" && flag == "--to" => target,
-        _ => return Err("usage: llmproxy credentials reencrypt --to <key-id>".into()),
-    };
-    let path = env::var(CONFIG_ENV).unwrap_or_else(|_| DEFAULT_CONFIG.to_owned());
-    let config = Config::load(&PathBuf::from(path))?;
-    let postgres = config
-        .postgres
-        .as_ref()
-        .ok_or("credential storage unavailable")?;
-    let encryption = config
-        .credential_encryption
-        .as_ref()
-        .ok_or("credential encryption unavailable")?;
-    let store = storage::Storage::new(postgres)?;
-    let result = store.reencrypt_credentials(encryption, target).await;
-    store.close().await;
-    let counts = result?;
-    println!(
-        "rewritten={} remaining={}",
-        counts.rewritten, counts.remaining
-    );
     Ok(())
 }
 
