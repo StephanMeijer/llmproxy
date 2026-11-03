@@ -47,7 +47,8 @@ async fn terminal_prompt_hides_credential_input() {
     let mut child = Command::new("script")
         .args([
             "-qefc",
-            &format!("'{BIN}' auth claude set {alice}"),
+            // `tty` first: the transcript's first line names the pseudo-terminal to watch.
+            &format!("tty; exec '{BIN}' auth claude set {alice}"),
             "/dev/null",
         ])
         .env("LLMPROXY_CONFIG", &op.db.path)
@@ -63,7 +64,27 @@ async fn terminal_prompt_hides_credential_input() {
         assert_eq!(stdout.read(&mut byte).unwrap(), 1);
         terminal.extend(byte);
     }
-    // When the credential is typed after the prompt.
+    // When the credential is typed after the prompt, once the terminal has stopped echoing.
+    // rpassword prints the prompt before it turns echo off, so the prompt alone is not enough.
+    let transcript = String::from_utf8_lossy(&terminal).into_owned();
+    let pts = transcript.lines().next().unwrap().trim();
+    assert!(pts.starts_with("/dev/"), "{transcript:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let settings = Command::new("stty")
+            .args(["-a", "-F", pts])
+            .output()
+            .unwrap();
+        let settings = String::from_utf8_lossy(&settings.stdout);
+        if settings.split_whitespace().any(|flag| flag == "-echo") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "echo never turned off: {settings}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let mut stdin = child.stdin.take().unwrap();
     writeln!(stdin, "{BOB_KEY}").unwrap();
     stdout.read_to_end(&mut terminal).unwrap();
