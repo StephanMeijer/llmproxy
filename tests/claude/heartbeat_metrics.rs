@@ -47,12 +47,12 @@ async fn heartbeat_observes_partition_and_recovery_without_another_authenticatio
     // When the database disappears and recovers while only metrics are scraped.
     connections(&f, false).await;
     availability(&binary, false).await;
-    let text = scrape(&f, &binary, "heartbeat-outage").await;
+    let text = scrape(&f, &binary, "heartbeat-outage", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("llm3_http_requests_total{route=\"claude\",code=\"200\"} 1\n"));
     connections(&f, true).await;
     availability(&binary, true).await;
-    let text = scrape(&f, &binary, "heartbeat-recovery").await;
+    let text = scrape(&f, &binary, "heartbeat-recovery", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     // Then a successful renewal recovers availability and healthy fencing never marks an outage.
     send.send(Bytes::from_static(b"data: recovered\n\n"))
@@ -70,7 +70,7 @@ async fn heartbeat_observes_partition_and_recovery_without_another_authenticatio
     tokio::time::timeout(WAIT, dropped.notified())
         .await
         .unwrap();
-    let text = scrape(&f, &binary, "heartbeat-fenced").await;
+    let text = scrape(&f, &binary, "heartbeat-fenced", None).await;
     assert!(text.contains("llm3_postgres_available 1\n"));
     drop(response);
     drop(send);

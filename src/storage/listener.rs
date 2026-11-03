@@ -14,6 +14,7 @@ use tokio::{
     sync::{
         Mutex,
         broadcast::{self, error::RecvError},
+        watch,
     },
     task::{AbortHandle, JoinHandle},
 };
@@ -39,6 +40,7 @@ pub(super) struct Notifications {
 
 struct Running {
     changes: broadcast::Receiver<Hint>,
+    credentials: watch::Receiver<()>,
     listening: Arc<AtomicBool>,
     abort: AbortHandle,
     join: Mutex<Option<JoinHandle<()>>>,
@@ -58,14 +60,25 @@ impl Notifications {
 
     /// Returns a receiver and whether LISTEN is already active, so no later hint can be missed.
     fn subscribe(&self) -> (broadcast::Receiver<Hint>, bool) {
-        let running = self.task.get_or_init(|| {
+        let running = self.running();
+        // Subscribe before reading the flag: a LISTEN completing in between still sends its hint.
+        let changes = running.changes.resubscribe();
+        (changes, running.listening.load(Ordering::SeqCst))
+    }
+
+    fn running(&self) -> &Running {
+        self.task.get_or_init(|| {
             let (sender, changes) = broadcast::channel(BUFFERED_HINTS);
+            let (credential_sender, credentials) = watch::channel(());
             let listening = Arc::new(AtomicBool::new(false));
             let active = Arc::clone(&listening);
             let pool = self.pool.clone();
             let join = tokio::spawn(async move {
                 while !pool.is_closed() {
-                    if receive(&pool, &sender, &active).await.is_err() {
+                    if receive(&pool, &sender, &credential_sender, &active)
+                        .await
+                        .is_err()
+                    {
                         active.store(false, Ordering::SeqCst);
                         // A reconnect gap may hide any change: wake everyone.
                         sender.send(None).ok();
@@ -78,14 +91,12 @@ impl Notifications {
             });
             Running {
                 changes,
+                credentials,
                 listening,
                 abort: join.abort_handle(),
                 join: Mutex::new(Some(join)),
             }
-        });
-        // Subscribe before reading the flag: a LISTEN completing in between still sends its hint.
-        let changes = running.changes.resubscribe();
-        (changes, running.listening.load(Ordering::SeqCst))
+        })
     }
 
     pub(super) async fn close(&self) {
@@ -105,6 +116,7 @@ impl Notifications {
 async fn receive(
     pool: &PgPool,
     sender: &broadcast::Sender<Hint>,
+    credentials: &watch::Sender<()>,
     listening: &AtomicBool,
 ) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect_with(pool).await?;
@@ -116,9 +128,17 @@ async fn receive(
     .map_err(|_| sqlx::Error::PoolTimedOut)??;
     listening.store(true, Ordering::SeqCst);
     sender.send(None).ok();
+    credentials.send_replace(());
     loop {
         // None reports a reconnect gap and must wake readers just like a notification.
-        let hint = listener.try_recv().await?.and_then(|notification| {
+        let notification = listener.try_recv().await?;
+        if notification
+            .as_ref()
+            .is_none_or(|n| n.channel() == "llmproxy_credentials")
+        {
+            credentials.send_replace(());
+        }
+        let hint = notification.and_then(|notification| {
             (notification.channel() == "llmproxy_storage" && !notification.payload().is_empty())
                 .then(|| notification.payload().to_owned())
         });
@@ -131,6 +151,13 @@ impl Drop for Notifications {
         if let Some(task) = self.task.get() {
             task.abort.abort();
         }
+    }
+}
+
+impl Storage {
+    /// Fires on credential notifications and listener (re)connects; ends when storage closes.
+    pub(crate) fn credential_changes(&self) -> watch::Receiver<()> {
+        self.notifications.running().credentials.clone()
     }
 }
 

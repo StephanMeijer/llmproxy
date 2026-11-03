@@ -1,14 +1,30 @@
 use super::support::*;
 use axum::http::StatusCode;
 use llmproxy::secret::SecretBytes;
+use std::time::Duration;
 
-pub async fn scrape(f: &Fixture, binary: &Binary, phase: &str) -> String {
-    let text = reqwest::get(&binary.metrics)
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+/// Credential counts refresh in the background, so poll until `expected` counts appear.
+pub async fn scrape(
+    f: &Fixture,
+    binary: &Binary,
+    phase: &str,
+    expected: Option<[u64; 4]>,
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let text = loop {
+        let text = reqwest::get(&binary.metrics)
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        if expected.is_none_or(|expected| lines(expected).all(|line| text.contains(&line)))
+            || tokio::time::Instant::now() >= deadline
+        {
+            break text;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     for secret in [
         ALICE_KEY,
         BOB_KEY,
@@ -34,17 +50,20 @@ pub async fn scrape(f: &Fixture, binary: &Binary, phase: &str) -> String {
     text
 }
 
-pub fn counts(text: &str, expected: [u64; 4]) {
-    for (state, count) in ["active", "invalid", "removed", "unavailable"]
+fn lines(expected: [u64; 4]) -> impl Iterator<Item = String> {
+    ["active", "invalid", "removed", "unavailable"]
         .into_iter()
         .zip(expected)
-    {
-        assert!(
-            text.contains(&format!(
+        .map(|(state, count)| {
+            format!(
                 "llm3_provider_credentials{{provider=\"anthropic\",state=\"{state}\"}} {count}\n"
-            )),
-            "{text}"
-        );
+            )
+        })
+}
+
+pub fn counts(text: &str, expected: [u64; 4]) {
+    for line in lines(expected) {
+        assert!(text.contains(&line), "{text}");
     }
 }
 
@@ -78,7 +97,7 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
     let request = tokio::spawn(f.request(&binary, false).send());
     reply(f.hit().await, StatusCode::OK, "ok");
     assert_eq!(request.await.unwrap().unwrap().status(), StatusCode::OK);
-    let text = scrape(&f, &binary, "installed").await;
+    let text = scrape(&f, &binary, "installed", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("llm3_postgres_available 1\n"));
     assert!(!text.contains("operation=\"install\""));
@@ -89,7 +108,7 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
         request.await.unwrap().unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    let text = scrape(&f, &binary, "invalid").await;
+    let text = scrape(&f, &binary, "invalid", Some([1, 1, 0, 0])).await;
     counts(&text, [1, 1, 0, 0]);
     assert!(text.contains("operation=\"invalidate\",outcome=\"success\"} 1\n"));
 
@@ -98,13 +117,16 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
         f.request(&binary, true).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    counts(&scrape(&f, &binary, "removed").await, [0, 1, 1, 0]);
+    counts(
+        &scrape(&f, &binary, "removed", Some([0, 1, 1, 0])).await,
+        [0, 1, 1, 0],
+    );
     connections(&f, false).await;
     assert_eq!(
         f.request(&binary, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let text = scrape(&f, &binary, "outage").await;
+    let text = scrape(&f, &binary, "outage", Some([0, 1, 1, 0])).await;
     counts(&text, [0, 1, 1, 0]);
     assert!(text.contains("llm3_postgres_available 0\n"));
     connections(&f, true).await;
@@ -112,7 +134,7 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
         f.request(&binary, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let text = scrape(&f, &binary, "recovery").await;
+    let text = scrape(&f, &binary, "recovery", Some([0, 1, 1, 0])).await;
     // Then counts remain authoritative even though invalid credentials cannot forward.
     counts(&text, [0, 1, 1, 0]);
     assert!(text.contains("llm3_postgres_available 1\n"));
@@ -139,7 +161,7 @@ async fn real_binary_records_invalidation_conflict_and_database_failure() {
         request.await.unwrap().unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    let text = scrape(&f, &binary, "conflict").await;
+    let text = scrape(&f, &binary, "conflict", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("operation=\"invalidate\",outcome=\"conflict\"} 1\n"));
     assert!(text.contains("llm3_shared_limit_conflicts_total{provider=\"anthropic\"} 0\n"));
@@ -152,7 +174,7 @@ async fn real_binary_records_invalidation_conflict_and_database_failure() {
         request.await.unwrap().unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    let text = scrape(&f, &binary, "invalidation-unavailable").await;
+    let text = scrape(&f, &binary, "invalidation-unavailable", Some([2, 0, 0, 0])).await;
     // Then counters distinguish durable conflict and failure, retaining the last counts.
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("llm3_postgres_available 0\n"));
@@ -180,7 +202,7 @@ async fn real_binary_counts_corrupt_and_missing_key_envelopes_as_unavailable() {
             StatusCode::SERVICE_UNAVAILABLE
         );
     }
-    let text = scrape(&f, &binary, "undecryptable").await;
+    let text = scrape(&f, &binary, "undecryptable", Some([0, 0, 0, 2])).await;
     // Then local decryption failures are not reported as database outages or active credentials.
     counts(&text, [0, 0, 0, 2]);
     assert!(text.contains("llm3_postgres_available 1\n"));
