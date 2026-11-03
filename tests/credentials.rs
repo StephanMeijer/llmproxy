@@ -6,6 +6,8 @@ mod database;
 mod database_close;
 #[path = "credentials/disabled.rs"]
 mod disabled;
+#[path = "common/eventually.rs"]
+mod eventually;
 #[path = "common/evidence.rs"]
 mod evidence;
 #[path = "credentials/lifecycle.rs"]

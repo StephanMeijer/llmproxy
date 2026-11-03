@@ -53,20 +53,13 @@ impl Fixture {
         self.db.close().await;
     }
     pub async fn waiters(&self, count: i64) {
-        tokio::time::timeout(LONG, async {
-            loop {
-                let actual: i64 = sqlx::query_scalar("SELECT count(*) FROM fifo_waiters")
-                    .fetch_one(&self.db.pool)
-                    .await
-                    .unwrap();
-                if actual == count {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        super::eventually::count_eventually(
+            &self.db.pool,
+            "SELECT count(*) FROM fifo_waiters",
+            count,
+            LONG,
+        )
+        .await;
     }
     pub async fn refill(&self) {
         sqlx::query("UPDATE rate_state SET updated_at=clock_timestamp()-interval '61 seconds'")

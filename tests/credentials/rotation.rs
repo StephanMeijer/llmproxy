@@ -39,21 +39,13 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let count: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM provider_credentials WHERE key_id='new'")
-                    .fetch_one(&db.pool)
-                    .await
-                    .unwrap();
-            if count == 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    super::eventually::count_eventually(
+        &db.pool,
+        "SELECT count(*) FROM provider_credentials WHERE key_id='new'",
+        1,
+        Duration::from_secs(10),
+    )
+    .await;
     let argv = fs::read(format!("/proc/{}/cmdline", child.id())).unwrap();
     assert!(!argv.is_empty());
     // When killed after one committed row and restarted with the same command.

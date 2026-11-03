@@ -10,6 +10,8 @@ mod database_close;
 mod deadline;
 #[path = "shared_rate/deadline_bounds.rs"]
 mod deadline_bounds;
+#[path = "common/eventually.rs"]
+mod eventually;
 #[path = "shared_rate/expiry.rs"]
 mod expiry;
 #[path = "shared_rate/fifo.rs"]

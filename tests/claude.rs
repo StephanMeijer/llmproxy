@@ -10,6 +10,8 @@ mod database;
 mod database_close;
 #[path = "claude/edges.rs"]
 mod edges;
+#[path = "common/eventually.rs"]
+mod eventually;
 #[path = "claude/heartbeat_metrics.rs"]
 mod heartbeat_metrics;
 #[path = "claude/lifecycle.rs"]

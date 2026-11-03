@@ -5,7 +5,7 @@ use super::{
 };
 use serde_json::{Value, json};
 use sqlx::AssertSqlSafe;
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, path::PathBuf};
 
 pub const ALICE: &str = "fake-integration-alice-canary";
 pub const BOB: &str = "fake-integration-bob-canary";
@@ -218,19 +218,6 @@ impl Database {
 
     pub async fn count(&self, table: &str, expected: i64) {
         let query = format!("SELECT count(*) FROM {table}");
-        tokio::time::timeout(super::WAIT, async {
-            loop {
-                let count: i64 = sqlx::query_scalar(AssertSqlSafe(query.as_str()))
-                    .fetch_one(&self.pool)
-                    .await
-                    .unwrap();
-                if count == expected {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("observed SQL count never reached expected state");
+        super::eventually::count_eventually(&self.pool, &query, expected, super::WAIT).await;
     }
 }
