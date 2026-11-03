@@ -20,7 +20,10 @@ pub struct Replica {
 pub struct Lease(Arc<Mutex<State>>);
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.0.lock().unwrap().leases -= 1;
+        let state = self.0.lock();
+        if !std::thread::panicking() {
+            state.unwrap().leases -= 1;
+        }
     }
 }
 impl AdmissionStore for Replica {

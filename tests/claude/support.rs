@@ -48,7 +48,10 @@ pub struct Binary {
 impl Drop for Binary {
     fn drop(&mut self) {
         shutdown::stop(&mut self.child);
-        fs::remove_file(&self.config).unwrap();
+        let removed = fs::remove_file(&self.config);
+        if !std::thread::panicking() {
+            removed.unwrap();
+        }
     }
 }
 

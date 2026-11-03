@@ -40,11 +40,14 @@ impl OwnedPostgres {
     }
 
     fn command(&self, operation: &[&str]) -> Output {
+        self.try_command(operation).unwrap()
+    }
+
+    fn try_command(&self, operation: &[&str]) -> std::io::Result<Output> {
         Command::new("docker")
             .args(operation)
             .arg(&self.id)
             .output()
-            .unwrap()
     }
 
     async fn ready(&self) {
@@ -77,12 +80,13 @@ impl OwnedPostgres {
 
 impl Drop for OwnedPostgres {
     fn drop(&mut self) {
-        assert!(
-            self.command(&["rm", "--force", "--volumes"])
-                .status
-                .success(),
-            "owned PostgreSQL cleanup failed"
-        );
+        let removed = self.try_command(&["rm", "--force", "--volumes"]);
+        if !std::thread::panicking() {
+            assert!(
+                removed.unwrap().status.success(),
+                "owned PostgreSQL cleanup failed"
+            );
+        }
     }
 }
 
@@ -101,23 +105,32 @@ impl Outage<'_> {
 
 impl Drop for Outage<'_> {
     fn drop(&mut self) {
-        if !self.recovered {
-            assert!(self.server.command(&["start"]).status.success());
-            let deadline = Instant::now() + super::WAIT;
-            loop {
-                let ready = Command::new("docker")
-                    .args(["exec", &self.server.id, "pg_isready", "-U", "postgres"])
-                    .output()
-                    .unwrap();
-                if ready.status.success() {
-                    break;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "PostgreSQL panic cleanup restart timed out"
-                );
-                std::thread::sleep(Duration::from_millis(50));
+        if self.recovered {
+            return;
+        }
+        let panicking = std::thread::panicking();
+        let started = self.server.try_command(&["start"]);
+        if !panicking {
+            assert!(started.unwrap().status.success());
+        }
+        let deadline = Instant::now() + super::WAIT;
+        loop {
+            let ready = Command::new("docker")
+                .args(["exec", &self.server.id, "pg_isready", "-U", "postgres"])
+                .output();
+            let ready = if panicking {
+                ready.is_ok_and(|ready| ready.status.success())
+            } else {
+                ready.unwrap().status.success()
+            };
+            if ready {
+                break;
             }
+            if Instant::now() >= deadline {
+                assert!(panicking, "PostgreSQL panic cleanup restart timed out");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }

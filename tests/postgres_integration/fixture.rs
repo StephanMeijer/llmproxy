@@ -177,6 +177,9 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
         for entry in fs::read_dir(&self.db.directory).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|e| e == "log") {
