@@ -142,6 +142,7 @@ async fn real_binary_records_invalidation_conflict_and_database_failure() {
     let text = scrape(&f, &binary, "conflict").await;
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("operation=\"invalidate\",outcome=\"conflict\"} 1\n"));
+    assert!(text.contains("llm3_shared_limit_conflicts_total{provider=\"anthropic\"} 0\n"));
     assert!(!text.contains("runtime-replacement-canary"));
     let request = tokio::spawn(f.request(&binary, true).send());
     let hit = f.hit().await;
