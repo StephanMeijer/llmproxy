@@ -1,10 +1,7 @@
 use super::*;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
-use llmproxy::{
-    config::PostgresConfig,
-    storage::{ChangeListener, StorageError},
-};
+use llmproxy::{config::PostgresConfig, storage::StorageError};
 use std::{
     env, fs,
     net::TcpListener,
@@ -114,7 +111,7 @@ async fn postgres_stop_restart_recovers_same_runtime_and_listener() {
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    let mut listener = ChangeListener::new(store.clone());
+    let mut listener = CredentialReader::new(store.clone());
     assert_eq!(
         listener
             .credential(person, SHORT)

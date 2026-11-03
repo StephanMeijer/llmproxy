@@ -1,4 +1,4 @@
-use super::{CredentialRecord, LimitKey, LimitSnapshot, PersonId, Storage, StorageError};
+use super::{LimitKey, LimitSnapshot, Storage, StorageError};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgListener, PgPoolOptions},
@@ -125,22 +125,6 @@ impl ChangeListener {
             Ok(Ok(())) | Err(_) => Ok(()),
             Ok(Err(_)) => Err(StorageError::Unavailable),
         }
-    }
-
-    /// Waits for a hint or timeout, then reads the current credential generation.
-    /// The first call subscribes and immediately reloads, closing the subscribe race.
-    /// # Errors
-    /// Returns a sanitized availability/schema error; a later call retries connection.
-    pub async fn credential(
-        &mut self,
-        person: PersonId,
-        wait: Duration,
-    ) -> Result<Option<CredentialRecord>, StorageError> {
-        self.changed(wait).await?;
-        let mut tx = self.storage.begin().await?;
-        let result = tx.credential(person).await?;
-        tx.rollback().await?;
-        Ok(result)
     }
 
     /// Waits for a hint, timeout, or reconnect and reloads the complete limit state.

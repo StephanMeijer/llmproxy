@@ -17,7 +17,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
         .install(bob, &SecretBytes::new(BOB.to_vec()))
         .await
         .unwrap();
-    assert_eq!(store.credential_key_references("old").await.unwrap(), 2);
+    assert_eq!(key_references(&db, "old").await, 2);
     let config = encryption(&db);
     let text = format!(
         "{}\n[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id='new'\n[credential_encryption.keys]\nold='{}'\nnew='{}'\n",
@@ -69,8 +69,8 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     assert!(restarted.status.success());
     assert_eq!(restarted.stdout, b"{\"rewritten\":1,\"remaining\":0}\n");
     // Then only the new key is referenced, both secrets survive, and another run is a no-op.
-    assert_eq!(store.credential_key_references("old").await.unwrap(), 0);
-    assert_eq!(store.credential_key_references("new").await.unwrap(), 2);
+    assert_eq!(key_references(&db, "old").await, 0);
+    assert_eq!(key_references(&db, "new").await, 2);
     let repeated = store.reencrypt_credentials(&config, "new").await.unwrap();
     assert_eq!(repeated.rewritten, 0);
     assert_eq!(repeated.remaining, 0);

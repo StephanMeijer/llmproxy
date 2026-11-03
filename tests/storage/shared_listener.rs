@@ -1,5 +1,5 @@
 use super::*;
-use llmproxy::storage::{ChangeListener, StorageError};
+use llmproxy::storage::StorageError;
 
 const WAITERS: usize = 256;
 
@@ -31,7 +31,7 @@ async fn hundreds_of_waiters_share_one_connection_per_runtime() {
     for store in [&first, &second] {
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..WAITERS {
-            let mut reader = ChangeListener::new(store.clone());
+            let mut reader = CredentialReader::new(store.clone());
             tasks.spawn(async move {
                 assert!(reader.credential(person, LONG).await.unwrap().is_none());
                 reader
@@ -89,7 +89,7 @@ async fn hundreds_of_waiters_share_one_connection_per_runtime() {
 async fn dropping_runtime_releases_shared_listener_connection() {
     // Given a runtime with a live shared listener.
     let (db, store, person) = setup().await;
-    let mut reader = ChangeListener::new(store.clone());
+    let mut reader = CredentialReader::new(store.clone());
     reader.credential(person, LONG).await.unwrap();
     assert_eq!(connections(&db).await.1, 1);
     // When the final runtime and subscriber owners are dropped without close.
@@ -110,7 +110,7 @@ async fn dropping_runtime_releases_shared_listener_connection() {
 async fn slow_subscriber_coalesces_notification_burst_and_rereads() {
     // Given a subscriber left idle while more notifications arrive than a bounded queue holds.
     let (db, store, person) = setup().await;
-    let mut reader = ChangeListener::new(store.clone());
+    let mut reader = CredentialReader::new(store.clone());
     reader.credential(person, LONG).await.unwrap();
     let mut tx = store.begin().await.unwrap();
     tx.insert_credential(&credential(person), &[8; 32])
@@ -142,7 +142,7 @@ async fn subscribing_after_runtime_close_fails_without_waiting_for_notification(
     // Given a closed runtime that never started its notification task.
     let (db, store, person) = setup().await;
     store.close().await;
-    let mut reader = ChangeListener::new(store.clone());
+    let mut reader = CredentialReader::new(store.clone());
     // When a new subscriber requests a long notification wait.
     let result = tokio::time::timeout(SHORT, reader.credential(person, LONG))
         .await
@@ -167,7 +167,7 @@ async fn failed_initial_listener_connection_retries_after_database_reopens() {
     .execute(&db.admin)
     .await
     .unwrap();
-    let mut reader = ChangeListener::new(store.clone());
+    let mut reader = CredentialReader::new(store.clone());
     assert!(reader.credential(person, LONG).await.unwrap().is_none());
     assert_eq!(connections(&db).await.1, 0);
     // When the database accepts connections again without restarting the runtime.
