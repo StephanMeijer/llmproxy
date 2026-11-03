@@ -67,7 +67,7 @@ impl StorageTransaction {
     pub async fn lock_limit(&mut self, key: &LimitKey) -> Result<LimitSnapshot, StorageError> {
         let (definition, version): (String, i64) = sqlx::query_as("SELECT config::text,version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND name=$3 FOR UPDATE")
             .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_one(&mut *self.tx).await?;
-        self.locked = Some(key.clone());
+        self.mark_locked(key);
         let rates = self.lock_rates(key).await?;
         let waiters = self.waiters(key).await?;
         let leases = self.leases(key).await?;
@@ -110,7 +110,12 @@ impl StorageTransaction {
         }
         sqlx::query("SELECT version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND name=$3 FOR UPDATE")
             .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_one(&mut *self.tx).await?;
-        self.locked = Some(key.clone());
+        self.mark_locked(key);
         Ok(())
+    }
+
+    fn mark_locked(&mut self, key: &LimitKey) {
+        self.mixed |= self.locked.as_ref().is_some_and(|locked| locked != key);
+        self.locked = Some(key.clone());
     }
 }

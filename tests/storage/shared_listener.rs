@@ -187,3 +187,56 @@ async fn failed_initial_listener_connection_retries_after_database_reopens() {
     store.close().await;
     db.close().await;
 }
+
+#[tokio::test]
+async fn limit_commits_wake_only_waiters_on_the_same_limit() {
+    // Given definitions for two people and a waiter subscribed to Bob's limit only.
+    let (db, store, alice) = setup().await;
+    let bob = PersonId(Uuid::new_v4());
+    let key = |person| LimitKey {
+        person,
+        name: "budget".into(),
+    };
+    let mut tx = store.begin().await.unwrap();
+    tx.create_person(bob, "Bob").await.unwrap();
+    tx.put_limit(&key(alice), &definition()).await.unwrap();
+    tx.put_limit(&key(bob), &definition()).await.unwrap();
+    tx.commit().await.unwrap();
+    let touch = |person| {
+        let store = store.clone();
+        async move {
+            let mut tx = store.begin().await.unwrap();
+            tx.lock_limit(&key(person)).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    let mut waiter = ChangeListener::for_limit(store.clone(), &key(bob));
+    waiter.changed(LONG).await.unwrap();
+    // When Alice's limit commits, then Bob's waiter only returns by timeout.
+    touch(alice).await;
+    assert!(
+        tokio::time::timeout(SHORT, waiter.changed(LONG))
+            .await
+            .is_err()
+    );
+    // When Bob's limit commits, then the waiter wakes long before its own timeout.
+    touch(bob).await;
+    tokio::time::timeout(LONG, waiter.changed(LONG * 4))
+        .await
+        .unwrap()
+        .unwrap();
+    // Unscoped and unknown payloads fail open and wake it too.
+    for payload in ["", "garbage"] {
+        sqlx::query("SELECT pg_notify('llmproxy_storage', $1)")
+            .bind(payload)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(LONG, waiter.changed(LONG * 4))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    store.close().await;
+    db.close().await;
+}

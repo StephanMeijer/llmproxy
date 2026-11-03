@@ -3,13 +3,34 @@ use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgListener, PgPoolOptions},
 };
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
-    sync::{Mutex, watch},
+    sync::{
+        Mutex,
+        broadcast::{self, error::RecvError},
+    },
     task::{AbortHandle, JoinHandle},
 };
 
 const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+/// Hints buffered per subscriber; a subscriber that falls further behind is woken as lagged.
+const BUFFERED_HINTS: usize = 64;
+
+/// A change hint: the limit topic a commit touched, or `None` to wake every subscriber.
+type Hint = Option<String>;
+
+const LIMIT_TOPIC: &str = "limit:";
+
+/// The `llmproxy_storage` payload a commit locking `key` publishes; it is only ever compared.
+pub(super) fn limit_topic(namespace: &str, key: &LimitKey) -> String {
+    format!("{LIMIT_TOPIC}{namespace}/{}/{}", key.person.0, key.name)
+}
 
 pub(super) struct Notifications {
     pool: PgPool,
@@ -17,7 +38,8 @@ pub(super) struct Notifications {
 }
 
 struct Running {
-    changes: watch::Receiver<()>,
+    changes: broadcast::Receiver<Hint>,
+    listening: Arc<AtomicBool>,
     abort: AbortHandle,
     join: Mutex<Option<JoinHandle<()>>>,
 }
@@ -34,30 +56,36 @@ impl Notifications {
         }
     }
 
-    fn subscribe(&self) -> watch::Receiver<()> {
-        self.task
-            .get_or_init(|| {
-                let (sender, changes) = watch::channel(());
-                let pool = self.pool.clone();
-                let join = tokio::spawn(async move {
-                    while !pool.is_closed() {
-                        if receive(&pool, &sender).await.is_err() {
-                            sender.send_replace(());
-                            tokio::select! {
-                                () = tokio::time::sleep(RETRY_INTERVAL) => {},
-                                () = pool.close_event() => break,
-                            }
+    /// Returns a receiver and whether LISTEN is already active, so no later hint can be missed.
+    fn subscribe(&self) -> (broadcast::Receiver<Hint>, bool) {
+        let running = self.task.get_or_init(|| {
+            let (sender, changes) = broadcast::channel(BUFFERED_HINTS);
+            let listening = Arc::new(AtomicBool::new(false));
+            let active = Arc::clone(&listening);
+            let pool = self.pool.clone();
+            let join = tokio::spawn(async move {
+                while !pool.is_closed() {
+                    if receive(&pool, &sender, &active).await.is_err() {
+                        active.store(false, Ordering::SeqCst);
+                        // A reconnect gap may hide any change: wake everyone.
+                        sender.send(None).ok();
+                        tokio::select! {
+                            () = tokio::time::sleep(RETRY_INTERVAL) => {},
+                            () = pool.close_event() => break,
                         }
                     }
-                });
-                Running {
-                    changes,
-                    abort: join.abort_handle(),
-                    join: Mutex::new(Some(join)),
                 }
-            })
-            .changes
-            .clone()
+            });
+            Running {
+                changes,
+                listening,
+                abort: join.abort_handle(),
+                join: Mutex::new(Some(join)),
+            }
+        });
+        // Subscribe before reading the flag: a LISTEN completing in between still sends its hint.
+        let changes = running.changes.resubscribe();
+        (changes, running.listening.load(Ordering::SeqCst))
     }
 
     pub(super) async fn close(&self) {
@@ -74,7 +102,11 @@ impl Notifications {
     }
 }
 
-async fn receive(pool: &PgPool, sender: &watch::Sender<()>) -> Result<(), sqlx::Error> {
+async fn receive(
+    pool: &PgPool,
+    sender: &broadcast::Sender<Hint>,
+    listening: &AtomicBool,
+) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect_with(pool).await?;
     tokio::time::timeout(
         pool.options().get_acquire_timeout(),
@@ -82,11 +114,15 @@ async fn receive(pool: &PgPool, sender: &watch::Sender<()>) -> Result<(), sqlx::
     )
     .await
     .map_err(|_| sqlx::Error::PoolTimedOut)??;
-    sender.send_replace(());
+    listening.store(true, Ordering::SeqCst);
+    sender.send(None).ok();
     loop {
         // None reports a reconnect gap and must wake readers just like a notification.
-        listener.try_recv().await?;
-        sender.send_replace(());
+        let hint = listener.try_recv().await?.and_then(|notification| {
+            (notification.channel() == "llmproxy_storage" && !notification.payload().is_empty())
+                .then(|| notification.payload().to_owned())
+        });
+        sender.send(hint).ok();
     }
 }
 
@@ -101,7 +137,9 @@ impl Drop for Notifications {
 /// Notifications only prompt a fresh authoritative read; payloads are never trusted.
 pub struct ChangeListener {
     storage: Storage,
-    listener: Option<watch::Receiver<()>>,
+    listener: Option<broadcast::Receiver<Hint>>,
+    /// When set, keyed hints for other limits are ignored; unkeyed hints still wake.
+    topic: Option<String>,
 }
 
 impl ChangeListener {
@@ -110,21 +148,50 @@ impl ChangeListener {
         Self {
             storage,
             listener: None,
+            topic: None,
         }
     }
 
-    /// Waits for a change hint, reconnect, or timeout without reading any state.
-    /// The first call subscribes and returns immediately, closing the subscribe race.
+    /// A listener that sleeps through commits scoped to other limits.
+    #[must_use]
+    pub fn for_limit(storage: Storage, key: &LimitKey) -> Self {
+        let topic = Some(limit_topic(&storage.namespace, key));
+        Self {
+            storage,
+            listener: None,
+            topic,
+        }
+    }
+
+    /// Waits for a relevant change hint, reconnect, lag, or timeout without reading any state.
+    /// The first call subscribes and returns once LISTEN is active, closing the subscribe race.
     /// # Errors
     /// Returns `Unavailable` when the listener task has stopped.
     pub async fn changed(&mut self, wait: Duration) -> Result<(), StorageError> {
-        let listener = self
-            .listener
-            .get_or_insert_with(|| self.storage.notifications.subscribe());
-        match tokio::time::timeout(wait, listener.changed()).await {
-            Ok(Ok(())) | Err(_) => Ok(()),
-            Ok(Err(_)) => Err(StorageError::Unavailable),
-        }
+        let listener = if let Some(listener) = &mut self.listener {
+            listener
+        } else {
+            let (listener, listening) = self.storage.notifications.subscribe();
+            let listener = self.listener.insert(listener);
+            if listening {
+                return Ok(());
+            }
+            listener
+        };
+        let topic = self.topic.as_deref();
+        let relevant = async {
+            loop {
+                match listener.recv().await {
+                    // Only another limit's topic is skipped; any other payload wakes (fail open).
+                    Ok(Some(payload))
+                        if payload.starts_with(LIMIT_TOPIC)
+                            && topic.is_some_and(|topic| topic != payload) => {}
+                    Ok(_) | Err(RecvError::Lagged(_)) => return Ok(()),
+                    Err(RecvError::Closed) => return Err(StorageError::Unavailable),
+                }
+            }
+        };
+        tokio::time::timeout(wait, relevant).await.unwrap_or(Ok(()))
     }
 
     /// Waits for a hint or timeout, then reads the current credential generation.
