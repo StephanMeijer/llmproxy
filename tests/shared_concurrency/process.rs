@@ -3,7 +3,7 @@ use super::*;
 mod shutdown;
 use axum::{Router, body::Body, extract::State, response::Response, routing::get};
 use futures_util::StreamExt;
-use llmproxy::limit::shared::{AdmissionStore, SharedCharge, SharedRateStore};
+use llmproxy::limit::shared::{PendingAdmission, SharedRateStore, SharedRequest};
 use std::{
     fs,
     path::PathBuf,
@@ -121,24 +121,26 @@ pub async fn child() {
 }
 
 async fn hold(State(state): State<ChildState>) -> Response {
-    let definition = definition();
-    let guard = state
-        .store
-        .acquire(SharedCharge {
-            definition: &definition,
+    let definitions = [definition()];
+    let admission = PendingAdmission::new(
+        &definitions,
+        SharedRequest {
             person: state.person.0,
-            tokens: 0,
-        })
-        .await
-        .unwrap()
-        .unwrap();
+            path: "/claude/v1/messages",
+            model: None,
+            body_bytes: 0,
+        },
+    )
+    .acquire(&state.store)
+    .await
+    .unwrap();
     let stream = futures_util::stream::unfold(state.finish, |finish| async move {
         tokio::select! {
             () = finish.notified() => None,
             () = tokio::time::sleep(Duration::from_millis(40)) => Some((Ok::<_, std::io::Error>("data: held\n\n"), finish)),
         }
     });
-    Response::new(Body::from_stream(guard.stream(stream)))
+    Response::new(Body::from_stream(admission.stream(stream)))
 }
 
 async fn finish(State(state): State<ChildState>) {

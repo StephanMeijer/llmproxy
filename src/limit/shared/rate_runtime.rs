@@ -17,16 +17,6 @@ pub enum SharedAdmissionError {
     Storage(StorageError),
 }
 
-impl SharedAdmissionError {
-    #[must_use]
-    pub const fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::QueueTimeout(wait) => Some(*wait),
-            Self::Storage(_) => None,
-        }
-    }
-}
-
 impl fmt::Display for SharedAdmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

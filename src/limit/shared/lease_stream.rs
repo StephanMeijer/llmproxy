@@ -21,23 +21,6 @@ impl<E: fmt::Display> fmt::Display for LeaseStreamError<E> {
 }
 impl<E: std::error::Error + 'static> std::error::Error for LeaseStreamError<E> {}
 
-impl LeaseGuard {
-    /// Owns the upstream stream in a cancellation-aware task, including while the
-    /// downstream is backpressured or never polls again. Drop closes the receiver.
-    pub fn stream<S, T, E>(
-        self,
-        stream: S,
-    ) -> impl Stream<Item = Result<T, LeaseStreamError<E>>> + Send
-    where
-        S: Stream<Item = Result<T, E>> + Send + 'static,
-        T: Send + 'static,
-        E: Send + 'static,
-    {
-        let cancellation = LeaseCancellations(vec![self.cancellation()]);
-        relay(self, cancellation, stream)
-    }
-}
-
 impl Admission<Option<LeaseGuard>> {
     /// Retains every lease until the downstream ends; any loss stops the upstream
     /// even when the downstream is not polling.

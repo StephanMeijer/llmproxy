@@ -74,24 +74,24 @@ fn invalid_durable_balance_is_rejected_without_mutation() {
 }
 
 #[test]
-fn fingerprints_detect_every_behavior_change_and_order() {
+fn stored_definitions_detect_every_behavior_change_and_order() {
     let original = configs("name='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=1");
     let first = CompiledLimits::new(&original, "ns").unwrap();
-    let hash = first.shared.first().unwrap().fingerprint().unwrap();
+    // put_limit compares this serialization as JSONB to reject a conflicting replica.
+    let stored = serde_json::to_value(first.shared.first().unwrap()).unwrap();
     let identical = CompiledLimits::new(&original, "ns").unwrap();
-    identical.shared.first().unwrap().verify(&hash).unwrap();
+    assert_eq!(
+        serde_json::to_value(identical.shared.first().unwrap()).unwrap(),
+        stored
+    );
     for field in ["burst=1", "tpm_burst=1", "model='large'"] {
         let changed = configs(&format!(
             "name='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=1\n{field}"
         ));
-        assert!(
-            CompiledLimits::new(&changed, "ns")
-                .unwrap()
-                .shared
-                .first()
-                .unwrap()
-                .verify(&hash)
-                .is_err()
+        let compiled = CompiledLimits::new(&changed, "ns").unwrap();
+        assert_ne!(
+            serde_json::to_value(compiled.shared.first().unwrap()).unwrap(),
+            stored
         );
     }
     for changed in [
@@ -101,14 +101,10 @@ fn fingerprints_detect_every_behavior_change_and_order() {
         "name='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=2",
         "name='b'\nprefixes=['/']\nrpm=1\n---\nname='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=1",
     ] {
-        assert!(
-            CompiledLimits::new(&configs(changed), "ns")
-                .unwrap()
-                .shared
-                .last()
-                .unwrap()
-                .verify(&hash)
-                .is_err()
+        let compiled = CompiledLimits::new(&configs(changed), "ns").unwrap();
+        assert_ne!(
+            serde_json::to_value(compiled.shared.last().unwrap()).unwrap(),
+            stored
         );
     }
 }
@@ -258,10 +254,6 @@ async fn retries_hold_admission_without_recharge_and_people_have_separate_keys()
     assert_eq!(
         state.lock().unwrap().charged.get(&(bob, "a".into())),
         Some(&10)
-    );
-    assert_ne!(
-        compiled.shared.first().unwrap().key(alice),
-        compiled.shared.first().unwrap().key(bob)
     );
     assert_eq!(state.lock().unwrap().leases, 0);
 }
