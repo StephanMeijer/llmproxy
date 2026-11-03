@@ -352,7 +352,7 @@ impl Proxy {
     /// Returns a [`ConfigError`] naming the first invalid route or limit, or if the HTTP client
     /// cannot be built.
     pub fn new(mut config: Config) -> Result<Self, ConfigError> {
-        config.validate_adapters()?;
+        config.validate()?;
         let routes = config
             .routes
             .iter()

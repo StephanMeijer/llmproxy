@@ -185,7 +185,8 @@ impl Config {
     ///
     /// # Errors
     /// Returns a [`ConfigError`] for invalid TOML, unknown keys, an unresolved or unterminated
-    /// `${VAR}`, an empty `proxy_token`, or invalid optional adapter/storage settings.
+    /// `${VAR}`, an empty `proxy_token`, a duration too large to add to the clock, or invalid
+    /// optional adapter/storage settings.
     pub fn parse(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let mut value: toml::Value =
             toml::from_str(text).map_err(|_| ConfigError("parse config: invalid TOML".into()))?;
@@ -200,11 +201,21 @@ impl Config {
         if config.proxy_token.is_empty() {
             return Err(ConfigError("proxy_token must not be empty".into()));
         }
-        config.validate_adapters()?;
+        config.validate()?;
         Ok(config)
     }
 
-    pub(crate) fn validate_adapters(&mut self) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&mut self) -> Result<(), ConfigError> {
+        for (field, duration) in [
+            ("max_wait", self.max_wait),
+            ("connect_timeout", self.connect_timeout),
+        ] {
+            if !representable(duration) {
+                return Err(ConfigError(format!(
+                    "{field} must be a representable duration"
+                )));
+            }
+        }
         if let Some(postgres) = &self.postgres {
             postgres.validate()?;
         }
@@ -274,7 +285,7 @@ impl PostgresConfig {
             ("connect_timeout", self.connect_timeout),
             ("acquire_timeout", self.acquire_timeout),
         ] {
-            if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
+            if duration.is_zero() || !representable(duration) {
                 return Err(ConfigError(format!(
                     "postgres.{field} must be a positive, representable duration"
                 )));
@@ -311,6 +322,11 @@ impl CredentialEncryptionConfig {
         }
         Ok(())
     }
+}
+
+/// Whether `duration` can be added to the current instant without overflowing.
+fn representable(duration: Duration) -> bool {
+    Instant::now().checked_add(duration).is_some()
 }
 
 fn valid_identifier(value: &str) -> bool {
