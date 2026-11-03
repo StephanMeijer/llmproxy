@@ -113,7 +113,11 @@ impl ChangeListener {
         }
     }
 
-    async fn wake(&mut self, wait: Duration) -> Result<(), StorageError> {
+    /// Waits for a change hint, reconnect, or timeout without reading any state.
+    /// The first call subscribes and returns immediately, closing the subscribe race.
+    /// # Errors
+    /// Returns `Unavailable` when the listener task has stopped.
+    pub async fn changed(&mut self, wait: Duration) -> Result<(), StorageError> {
         let listener = self
             .listener
             .get_or_insert_with(|| self.storage.notifications.subscribe());
@@ -132,7 +136,7 @@ impl ChangeListener {
         person: PersonId,
         wait: Duration,
     ) -> Result<Option<CredentialRecord>, StorageError> {
-        self.wake(wait).await?;
+        self.changed(wait).await?;
         let mut tx = self.storage.begin().await?;
         let result = tx.credential(person).await?;
         tx.rollback().await?;
@@ -147,7 +151,7 @@ impl ChangeListener {
         key: &LimitKey,
         wait: Duration,
     ) -> Result<LimitSnapshot, StorageError> {
-        self.wake(wait).await?;
+        self.changed(wait).await?;
         let mut tx = self.storage.begin().await?;
         let result = tx.lock_limit(key).await?;
         tx.rollback().await?;
