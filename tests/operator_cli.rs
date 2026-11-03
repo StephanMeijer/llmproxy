@@ -6,6 +6,8 @@ mod concurrency;
 mod database;
 #[path = "operator_cli/edges.rs"]
 mod edges;
+#[path = "common/evidence.rs"]
+mod evidence;
 #[path = "operator_cli/failure.rs"]
 mod failure;
 #[path = "operator_cli/input.rs"]
@@ -13,6 +15,7 @@ mod input;
 #[path = "operator_cli/lifecycle.rs"]
 mod lifecycle;
 
+use evidence::artifact;
 use serde_json::Value;
 use std::{
     fs,
@@ -111,11 +114,5 @@ impl Operator {
             fs::remove_file(path).unwrap();
         }
         self.db.close().await;
-    }
-}
-
-fn artifact(name: &str, bytes: &[u8]) {
-    if let Ok(dir) = std::env::var("LLMPROXY_OPERATOR_EVIDENCE") {
-        fs::write(PathBuf::from(dir).join(name), bytes).unwrap();
     }
 }

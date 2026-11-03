@@ -4,6 +4,8 @@
 mod database;
 #[path = "credentials/disabled.rs"]
 mod disabled;
+#[path = "common/evidence.rs"]
+mod evidence;
 #[path = "credentials/lifecycle.rs"]
 mod lifecycle;
 #[path = "common/pg_dump.rs"]
@@ -13,6 +15,7 @@ mod rotation;
 #[path = "credentials/rotation_failure.rs"]
 mod rotation_failure;
 
+use evidence::artifact;
 use llmproxy::{
     config::CredentialEncryptionConfig,
     secret::{KeyRing, SecretBytes},
@@ -60,11 +63,5 @@ fn encryption(db: &database::Database) -> CredentialEncryptionConfig {
         active_key_id: "new".into(),
         fingerprint_key_file: PathBuf::from("/nonexistent/fingerprint"),
         keys: BTreeMap::from([("old".into(), old), ("new".into(), new)]),
-    }
-}
-
-fn artifact(name: &str, bytes: &[u8]) {
-    if let Ok(dir) = std::env::var("LLMPROXY_CREDENTIAL_EVIDENCE") {
-        fs::write(PathBuf::from(dir).join(name), bytes).unwrap();
     }
 }

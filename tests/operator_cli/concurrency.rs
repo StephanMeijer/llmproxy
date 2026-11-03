@@ -63,7 +63,7 @@ async fn parallel_issuance_and_replacement_preserve_identity_and_generations() {
     assert_eq!(count, 2);
     artifact(
         "concurrency-state.json",
-        &serde_json::to_vec_pretty(&state).unwrap(),
+        serde_json::to_vec_pretty(&state).unwrap(),
     );
     artifact("concurrency.txt", b"PASS two concurrent real token issue processes persist distinct valid tokens; concurrent replacements commit only matching generations or report conflict\n");
     op.close().await;

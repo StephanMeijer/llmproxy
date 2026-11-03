@@ -263,5 +263,6 @@ CARGO_TARGET_DIR=target/cov cargo llvm-cov --locked --fail-under-lines 99
 - **Advisories.** `cargo audit --deny warnings` fails on any RustSec advisory in `Cargo.lock`, including unmaintained and yanked crates. Install it with `cargo install cargo-audit --locked`.
 - **Toolchain.** Pinned in `rust-toolchain.toml`. Bump it on purpose: a new Rust release can add lints.
 - **Real database tests.** `LLMPROXY_TEST_DATABASE_URL` is mandatory for database tests and coverage, pointing at an isolated PostgreSQL 18 instance with CREATEDB and administrative fault-injection privileges. Tests create/drop isolated databases and use fake local upstreams, with no provider credentials. Docker must be available: `postgres_integration` owns an additional PostgreSQL 18 container for real stop/start crash tests. CLI tests run the built binary (Unix only). CI checks readiness and explicitly migrates before tests.
+- **Test evidence.** Set `LLMPROXY_TEST_EVIDENCE` to a directory to have tests write debug artifacts (request transcripts, database snapshots) under `<dir>/<test target>/`. Unset, tests write none.
 
 If your `CARGO_TARGET_DIR` is shared with other projects, give coverage its own, for example `CARGO_TARGET_DIR=target/cov cargo llvm-cov --locked`. Leftover profile files from other projects make `cargo llvm-cov report` fail.

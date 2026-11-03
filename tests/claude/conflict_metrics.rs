@@ -76,7 +76,7 @@ async fn divergent_replica_conflicts_increment_only_its_bounded_counter() {
     }
     artifact(
         "conflict-replicas.txt",
-        &format!(
+        format!(
             "PASS matching Claude=200, divergent Claude=503 twice, static=200; counters=0,0,2; fingerprints and identities absent\nnamespace=test\noriginal and matching:\n{LIMIT}\ndivergent:\n{CONFLICTING}"
         ),
     );
@@ -148,7 +148,7 @@ async fn queue_timeout_does_not_count_as_conflict() {
     conflicts(&f, &binary, "conflict-queue-timeout", 0).await;
     artifact(
         "conflict-queue.txt",
-        &format!(
+        format!(
             "PASS exhausted queue Claude=429 queue_timeout, no second upstream hit, conflict counter=0; elapsed={elapsed:?}, max_wait=15s, response_bound={QUEUE_RESPONSE_LIMIT:?}\n"
         ),
     );
