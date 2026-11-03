@@ -225,6 +225,50 @@ fn serves_without_a_metrics_listener_and_exits_cleanly_on_sigint() {
     fs::remove_file(path).unwrap();
 }
 
+/// Serves one `/healthz` request with `RUST_LOG` set to `filter` (or unset) and returns the log.
+fn request_log(name: &str, filter: Option<&str>) -> String {
+    let listen = free_port();
+    let path = write_config(name, &config(listen, ""));
+    let log = path.with_extension("log");
+    let mut command = Command::new(BIN);
+    command
+        .arg(&path)
+        .env(TOKEN_VAR, "t")
+        .env_remove("RUST_LOG")
+        .stdout(fs::File::create(&log).unwrap())
+        .stderr(Stdio::null());
+    if let Some(filter) = filter {
+        command.env("RUST_LOG", filter);
+    }
+    let mut server = Server(command.spawn().unwrap());
+    wait_until_listening(local(listen));
+    assert!(http_get(local(listen), "/healthz").starts_with("HTTP/1.1 200"));
+    signal(&server, "TERM");
+    assert!(wait_for_exit(&mut server).success());
+    let text = fs::read_to_string(&log).unwrap();
+    fs::remove_file(path).unwrap();
+    fs::remove_file(log).unwrap();
+    text
+}
+
+#[test]
+fn rust_log_selects_the_log_level() {
+    let request_line = |log: &str| {
+        log.lines()
+            .any(|line| line.contains(r#""message":"request""#))
+    };
+    let default = request_log("log-default", None);
+    assert!(
+        request_line(&default),
+        "info is the default level: {default}"
+    );
+    let quiet = request_log("log-warn", Some("warn"));
+    assert!(
+        !request_line(&quiet),
+        "RUST_LOG=warn hides per-request lines: {quiet}"
+    );
+}
+
 #[test]
 fn check_config_rejects_what_only_the_proxy_validates() {
     let twice = "[[route]]\nname = \"a\"\nupstream = \"http://h\"\n";
