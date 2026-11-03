@@ -54,7 +54,9 @@ impl StorageTransaction {
         if conflict {
             return Err(StorageError::Conflict);
         }
-        Ok(sqlx::query_scalar("INSERT INTO limit_definitions(namespace,person_id,provider,name,config) VALUES ($1,$2,'anthropic',$3,$4) ON CONFLICT(namespace,person_id,provider,name) DO UPDATE SET config=EXCLUDED.config RETURNING version")
+        // The conflict check above proves an existing row already holds this config, so it is never
+        // rewritten. The advisory lock makes a concurrent insert visible to the fallback SELECT.
+        Ok(sqlx::query_scalar("WITH inserted AS (INSERT INTO limit_definitions(namespace,person_id,provider,name,config) VALUES ($1,$2,'anthropic',$3,$4) ON CONFLICT(namespace,person_id,provider,name) DO NOTHING RETURNING version) SELECT version FROM inserted UNION ALL SELECT version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND name=$3 LIMIT 1")
             .bind(&self.namespace).bind(key.person).bind(&key.name).bind(sqlx::types::Json(definition))
             .fetch_one(&mut *self.tx).await?)
     }
