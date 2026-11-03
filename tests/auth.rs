@@ -13,6 +13,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use llmproxy::{
     auth::{AuthError, Authenticator, Principal, RouteKind},
     secret::ProxyToken,
+    storage::Storage,
 };
 use support::{Fixture, LEGACY};
 
@@ -21,7 +22,7 @@ async fn route_token_database_matrix_preserves_person_identity() {
     let fixture = Fixture::new().await;
     let unavailable = fixture.unavailable_config().await;
     for (available, postgres) in [(true, &fixture.db.config), (false, &unavailable)] {
-        let auth = Authenticator::new(LEGACY.into(), Some(postgres));
+        let auth = Authenticator::new(LEGACY.into(), Some(Storage::new(postgres).unwrap()));
         let (base, _servers) = http::start(postgres).await;
         let client = reqwest::Client::new();
         for route in [
@@ -150,7 +151,7 @@ async fn ambiguous_headers_fail_before_database_access() {
 #[tokio::test]
 async fn wrong_secret_and_unusable_hash_fail_closed() {
     let fixture = Fixture::new().await;
-    let auth = Authenticator::new(LEGACY.into(), Some(&fixture.db.config));
+    let auth = Authenticator::new(LEGACY.into(), Some(fixture.storage.clone()));
     let wrong = ProxyToken::parse(&format!("{}.{}", fixture.alice.id(), "0".repeat(64))).unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_str(wrong.expose()).unwrap());

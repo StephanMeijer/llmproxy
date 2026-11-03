@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     auth::Principal,
-    config::{CredentialEncryptionConfig, PostgresConfig},
+    config::CredentialEncryptionConfig,
     limit::shared::{
         CompiledLimits, LeaseCancellations, PendingAdmission, SharedAdmissionError,
         SharedDefinition, SharedRateStore, SharedRequest,
@@ -15,7 +15,7 @@ use crate::{
     storage::{CredentialVersion, Credentials, Storage, StorageError},
 };
 use std::io::Read;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 pub(super) const MESSAGES_PATH: &str = "/claude/v1/messages";
 const KEY_BYTES: u64 = 32;
@@ -23,20 +23,24 @@ const KEY_BYTES: u64 = 32;
 pub(super) struct Claude {
     route: Route,
     definitions: Vec<SharedDefinition>,
-    postgres: PostgresConfig,
+    storage: Storage,
     encryption: CredentialEncryptionConfig,
-    runtime: OnceLock<Result<(Credentials, SharedRateStore), StorageError>>,
+    runtime: OnceLock<(Credentials, SharedRateStore)>,
     refresh: tokio::sync::Mutex<()>,
 }
 
 impl Claude {
-    pub(super) fn configure(config: &Config) -> Result<(Option<Self>, Limits), ConfigError> {
+    pub(super) fn configure(
+        config: &Config,
+        storage: Option<Storage>,
+    ) -> Result<(Option<Self>, Limits), ConfigError> {
         let Some(claude) = &config.claude else {
             return Ok((None, Limits::new(&config.limits)?));
         };
-        let postgres = config
+        let (postgres, storage) = config
             .postgres
             .as_ref()
+            .zip(storage)
             .ok_or_else(|| ConfigError("Claude requires PostgreSQL".into()))?;
         let compiled = CompiledLimits::new(&config.limits, &postgres.namespace)?;
         let route = Route {
@@ -55,18 +59,8 @@ impl Claude {
             Some(Self {
                 route,
                 definitions: compiled.shared,
-                postgres: PostgresConfig {
-                    url: postgres.url.clone(),
-                    namespace: postgres.namespace.clone(),
-                    max_connections: postgres.max_connections,
-                    connect_timeout: postgres.connect_timeout,
-                    acquire_timeout: postgres.acquire_timeout,
-                },
-                encryption: CredentialEncryptionConfig {
-                    active_key_id: encryption.active_key_id.clone(),
-                    fingerprint_key_file: encryption.fingerprint_key_file.clone(),
-                    keys: encryption.keys.clone(),
-                },
+                storage,
+                encryption: encryption.clone(),
                 runtime: OnceLock::new(),
                 refresh: tokio::sync::Mutex::new(()),
             }),
@@ -74,31 +68,37 @@ impl Claude {
         ))
     }
 
-    fn runtime(
+    /// Key files are read on first use and retried on every request until they load,
+    /// so a mount that is late or briefly unreadable does not require a restart.
+    fn runtime(&self, max_wait: std::time::Duration) -> Option<&(Credentials, SharedRateStore)> {
+        if let Some(runtime) = self.runtime.get() {
+            return Some(runtime);
+        }
+        let loaded = self.load_runtime(max_wait)?;
+        Some(self.runtime.get_or_init(|| loaded))
+    }
+
+    fn load_runtime(
         &self,
         max_wait: std::time::Duration,
-        metrics: &Arc<CredentialMetrics>,
-    ) -> &Result<(Credentials, SharedRateStore), StorageError> {
-        self.runtime.get_or_init(|| {
-            let encryption = &self.encryption;
-            let storage = Storage::new(&self.postgres)?.with_metrics(Arc::clone(metrics));
-            let keys = KeyRing::load(&encryption.active_key_id, &encryption.keys)
-                .map_err(|_| StorageError::Unavailable)?;
-            let mut fingerprint = Vec::new();
-            std::fs::File::open(&encryption.fingerprint_key_file)
-                .map_err(|_| StorageError::Unavailable)?
-                .take(KEY_BYTES + 1)
-                .read_to_end(&mut fingerprint)
-                .map_err(|_| StorageError::Unavailable)?;
-            let fingerprint = SecretBytes::new(fingerprint);
-            if fingerprint.expose().len()
-                != usize::try_from(KEY_BYTES).map_err(|_| StorageError::Unavailable)?
-            {
-                return Err(StorageError::Unavailable);
-            }
-            let store = SharedRateStore::new(storage.clone(), max_wait);
-            Ok((Credentials::new(storage, keys, fingerprint), store))
-        })
+    ) -> Option<(Credentials, SharedRateStore)> {
+        let encryption = &self.encryption;
+        let keys = KeyRing::load(&encryption.active_key_id, &encryption.keys).ok()?;
+        let mut fingerprint = Vec::new();
+        std::fs::File::open(&encryption.fingerprint_key_file)
+            .ok()?
+            .take(KEY_BYTES + 1)
+            .read_to_end(&mut fingerprint)
+            .ok()?;
+        let fingerprint = SecretBytes::new(fingerprint);
+        if fingerprint.expose().len() != usize::try_from(KEY_BYTES).ok()? {
+            return None;
+        }
+        let store = SharedRateStore::new(self.storage.clone(), max_wait);
+        Some((
+            Credentials::new(self.storage.clone(), keys, fingerprint),
+            store,
+        ))
     }
 
     pub(super) async fn forward(&self, proxy: &Proxy, parts: &Parts, body: Body) -> Response {
@@ -113,8 +113,7 @@ impl Claude {
         let Some(Principal::Person(person)) = parts.extensions.get::<Principal>() else {
             return unavailable();
         };
-        let Ok((credentials, store)) = self.runtime(proxy.max_wait, &proxy.metrics.credentials)
-        else {
+        let Some((credentials, store)) = self.runtime(proxy.max_wait) else {
             return unavailable();
         };
         let snapshot = credentials.snapshot(*person).await;
@@ -201,12 +200,8 @@ impl Claude {
 
     async fn refresh_counts(&self, credentials: &Credentials, metrics: &CredentialMetrics) {
         let _refresh = self.refresh.lock().await;
-        match credentials.counts().await {
-            Ok(counts) => {
-                metrics.set_credentials(CredentialProvider::Anthropic, counts);
-                metrics.set_postgres_available(true);
-            }
-            Err(_) => metrics.set_postgres_available(false),
+        if let Ok(counts) = credentials.counts().await {
+            metrics.set_credentials(CredentialProvider::Anthropic, counts);
         }
     }
 }
@@ -231,7 +226,6 @@ async fn invalidate(
         Ok(()) => CredentialOutcome::Success,
         Err(StorageError::Conflict) => CredentialOutcome::Conflict,
         Err(_) => {
-            metrics.set_postgres_available(false);
             tracing::warn!("Claude credential invalidation unavailable");
             CredentialOutcome::Unavailable
         }
@@ -252,14 +246,8 @@ fn unavailable() -> Response {
 }
 
 fn admission_unavailable(storage_error: StorageError, metrics: &CredentialMetrics) -> Response {
-    match storage_error {
-        StorageError::Conflict => metrics.record_shared_limit_conflict(),
-        StorageError::Unavailable
-        | StorageError::IncompatibleSchema
-        | StorageError::UnsupportedServer
-        | StorageError::MigrationFailed
-        | StorageError::InvalidData
-        | StorageError::NotFound => {}
+    if storage_error == StorageError::Conflict {
+        metrics.record_shared_limit_conflict();
     }
     unavailable()
 }

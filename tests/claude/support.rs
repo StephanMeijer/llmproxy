@@ -162,7 +162,7 @@ impl Fixture {
             .path
             .with_extension(format!("{}.toml", Uuid::new_v4()));
         let log = path.with_extension("log");
-        fs::write(&path, format!("listen='{addr}'\nproxy_token='legacy'\nmax_wait='15s'\n{settings}\n[postgres]\nurl='{}'\nnamespace='test'\nacquire_timeout='1s'\nconnect_timeout='1s'\n[credential_encryption]\nactive_key_id='test'\nfingerprint_key_file='{}'\nkeys={{test='{}'}}\n[claude]\nupstream='{}'\n[[route]]\nname='static'\nupstream='{}'\n{limits}", self.db.config.url, self.pepper.display(), self.key.display(), self.upstream, self.upstream)).unwrap();
+        fs::write(&path, format!("listen='{addr}'\nproxy_token='legacy'\nmax_wait='15s'\n{settings}\n[postgres]\nurl='{}'\nnamespace='test'\nmax_connections={}\nacquire_timeout='1s'\nconnect_timeout='1s'\n[credential_encryption]\nactive_key_id='test'\nfingerprint_key_file='{}'\nkeys={{test='{}'}}\n[claude]\nupstream='{}'\n[[route]]\nname='static'\nupstream='{}'\n{limits}", self.db.config.url, self.db.config.max_connections, self.pepper.display(), self.key.display(), self.upstream, self.upstream)).unwrap();
         let output = fs::File::create(&log).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
             .arg(&path)

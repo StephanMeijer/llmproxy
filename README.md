@@ -167,7 +167,7 @@ target/release/llmproxy auth person status "$PERSON_ID"
 
 ### Two replicas and requests
 
-Give both replicas the same database, namespace, key files/key ring, and Claude limit definitions. Change only their client and metrics listen addresses (for example 8788/9180 and 8789/9181). A namespace isolates tenants' database state; it is not a substitute for database access control. Conflicting shared limit definitions fail Claude closed with `503`; coordinate configuration changes across replicas. Static route limits remain process-local. Budget approximately twice `max_connections` per replica for authentication and Claude pools, plus dedicated notification connections and operator commands; reserve database capacity for migrations and administration.
+Give both replicas the same database, namespace, key files/key ring, and Claude limit definitions. Change only their client and metrics listen addresses (for example 8788/9180 and 8789/9181). A namespace isolates tenants' database state; it is not a substitute for database access control. Conflicting shared limit definitions fail Claude closed with `503`; coordinate configuration changes across replicas. Static route limits remain process-local. Budget `max_connections` plus one notification connection per replica, plus operator commands; reserve database capacity for migrations and administration.
 
 ```sh
 target/release/llmproxy config.toml &

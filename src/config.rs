@@ -84,7 +84,7 @@ impl fmt::Debug for PostgresConfig {
 }
 
 /// Mounted master-key paths, never key bytes. Files are only read by runtime key-ring loading.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialEncryptionConfig {
     pub active_key_id: String,

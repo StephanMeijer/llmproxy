@@ -42,6 +42,20 @@ pub enum StorageError {
     NotFound,
 }
 
+impl StorageError {
+    /// True when the database itself, not the request, is the problem; drives the availability gauge.
+    #[must_use]
+    pub const fn is_outage(self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable
+                | Self::IncompatibleSchema
+                | Self::UnsupportedServer
+                | Self::MigrationFailed
+        )
+    }
+}
+
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {

@@ -15,8 +15,14 @@ pub async fn binary_scenario() {
     let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen = reservation.local_addr().unwrap();
     drop(reservation);
+    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metrics = format!("http://{}/metrics", reservation.local_addr().unwrap());
+    drop(reservation);
     let config = format!(
-        "listen='{listen}'\nproxy_token='{LEGACY}'\n[postgres]\nurl='{}'\nnamespace='test'\nacquire_timeout='1s'\nconnect_timeout='1s'\n[credential_encryption]\nactive_key_id='test'\nfingerprint_key_file='/missing'\nkeys={{test='/missing'}}\n[claude]\n[[route]]\nname='static'\nupstream='http://{upstream_addr}'\n",
+        "listen='{listen}'\nmetrics_listen='{}'\nproxy_token='{LEGACY}'\n[postgres]\nurl='{}'\nnamespace='test'\nacquire_timeout='1s'\nconnect_timeout='1s'\n[credential_encryption]\nactive_key_id='test'\nfingerprint_key_file='/missing'\nkeys={{test='/missing'}}\n[claude]\n[[route]]\nname='static'\nupstream='http://{upstream_addr}'\n",
+        metrics
+            .trim_start_matches("http://")
+            .trim_end_matches("/metrics"),
         fixture.db.config.url
     );
     std::fs::write(&fixture.db.path, config).unwrap();
@@ -48,6 +54,7 @@ pub async fn binary_scenario() {
     .await
     .unwrap();
     check_authenticated_paths(&client, &fixture, &base).await;
+    postgres_available(&client, &metrics, true).await;
     fixture.storage.close().await;
     fixture.db.pool.close().await;
     let database_name = reqwest::Url::parse(&fixture.db.config.url)
@@ -66,6 +73,25 @@ pub async fn binary_scenario() {
         .execute(&fixture.db.admin)
         .await
         .unwrap();
+    check_database_down(&client, &fixture, &base).await;
+    // Authentication alone, without any Claude traffic, must report the outage.
+    postgres_available(&client, &metrics, false).await;
+    let response = client
+        .get(format!("{base}/static/models"))
+        .bearer_auth(LEGACY)
+        .header("x-api-key", fixture.alice.expose())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 401);
+    println!("binary database=down conflicting_headers status=401 pass");
+    shutdown::stop(&mut child);
+    scan_log(&log_path, &fixture);
+    upstream_task.abort();
+    fixture.close().await;
+}
+
+async fn check_database_down(client: &reqwest::Client, fixture: &Fixture, base: &str) {
     for (path, token, expected) in [
         ("/static/models", LEGACY, 200),
         ("/static/models", fixture.alice.expose(), 503),
@@ -88,19 +114,6 @@ pub async fn binary_scenario() {
         assert_eq!(response.status().as_u16(), expected);
         println!("binary database=down path={path} expected_status={expected} pass");
     }
-    let response = client
-        .get(format!("{base}/static/models"))
-        .bearer_auth(LEGACY)
-        .header("x-api-key", fixture.alice.expose())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status().as_u16(), 401);
-    println!("binary database=down conflicting_headers status=401 pass");
-    shutdown::stop(&mut child);
-    scan_log(&log_path, &fixture);
-    upstream_task.abort();
-    fixture.close().await;
 }
 
 async fn check_authenticated_paths(client: &reqwest::Client, fixture: &Fixture, base: &str) {
@@ -137,6 +150,19 @@ async fn check_authenticated_paths(client: &reqwest::Client, fixture: &Fixture, 
         }
         println!("binary path={path} expected_status={expected} pass");
     }
+}
+
+async fn postgres_available(client: &reqwest::Client, metrics: &str, available: bool) {
+    let text = client
+        .get(metrics)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let expected = format!("llm3_postgres_available {}\n", u8::from(available));
+    assert!(text.contains(&expected), "{text}");
 }
 
 fn scan_log(log_path: &std::path::Path, fixture: &Fixture) {

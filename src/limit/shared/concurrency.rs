@@ -172,7 +172,6 @@ impl Controller {
             };
             match result {
                 Ok(Ok(true)) => {
-                    self.storage.observe_availability(true);
                     deadline = renewal_started + LEASE_LIFETIME - EXPIRY_MARGIN;
                     self.cancel.send_replace(LeaseStatus::Active(deadline));
                     next = renewal_started + RENEW_EVERY;
@@ -184,19 +183,7 @@ impl Controller {
                     }
                     break;
                 }
-                Ok(Err(
-                    StorageError::Unavailable
-                    | StorageError::IncompatibleSchema
-                    | StorageError::UnsupportedServer
-                    | StorageError::MigrationFailed,
-                ))
-                | Err(_) => {
-                    self.storage.observe_availability(false);
-                    next = Instant::now() + RETRY_EVERY;
-                }
-                Ok(Err(
-                    StorageError::Conflict | StorageError::NotFound | StorageError::InvalidData,
-                )) => next = Instant::now() + RETRY_EVERY,
+                Ok(Err(_)) | Err(_) => next = Instant::now() + RETRY_EVERY,
             }
         }
         if matches!(*self.cancel.borrow(), LeaseStatus::Active(_)) {
@@ -207,23 +194,11 @@ impl Controller {
             };
             self.cancel.send_replace(status);
         }
-        match tokio::time::timeout(OPERATION_TIMEOUT, self.release()).await {
-            Ok(Ok(())) => self.storage.observe_availability(true),
-            Ok(Err(
-                StorageError::Conflict | StorageError::NotFound | StorageError::InvalidData,
-            )) => {
-                tracing::warn!("shared concurrency release unconfirmed; awaiting database expiry");
-            }
-            Ok(Err(
-                StorageError::Unavailable
-                | StorageError::IncompatibleSchema
-                | StorageError::UnsupportedServer
-                | StorageError::MigrationFailed,
-            ))
-            | Err(_) => {
-                self.storage.observe_availability(false);
-                tracing::warn!("shared concurrency release unconfirmed; awaiting database expiry");
-            }
+        if !matches!(
+            tokio::time::timeout(OPERATION_TIMEOUT, self.release()).await,
+            Ok(Ok(()))
+        ) {
+            tracing::warn!("shared concurrency release unconfirmed; awaiting database expiry");
         }
     }
 
