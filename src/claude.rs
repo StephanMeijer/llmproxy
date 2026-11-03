@@ -11,14 +11,12 @@ use crate::{
         SharedDefinition, SharedRateStore, SharedRequest,
     },
     metrics::{CredentialMetrics, CredentialOperation, CredentialOutcome, CredentialProvider},
-    secret::{KeyRing, SecretBytes},
+    secret::{self, KeyRing},
     storage::{CredentialVersion, Credentials, Storage, StorageError},
 };
-use std::io::Read;
 use std::sync::OnceLock;
 
 pub(super) const MESSAGES_PATH: &str = "/claude/v1/messages";
-const KEY_BYTES: u64 = 32;
 
 pub(super) struct Claude {
     route: Route,
@@ -84,16 +82,7 @@ impl Claude {
     ) -> Option<(Credentials, SharedRateStore)> {
         let encryption = &self.encryption;
         let keys = KeyRing::load(&encryption.active_key_id, &encryption.keys).ok()?;
-        let mut fingerprint = Vec::new();
-        std::fs::File::open(&encryption.fingerprint_key_file)
-            .ok()?
-            .take(KEY_BYTES + 1)
-            .read_to_end(&mut fingerprint)
-            .ok()?;
-        let fingerprint = SecretBytes::new(fingerprint);
-        if fingerprint.expose().len() != usize::try_from(KEY_BYTES).ok()? {
-            return None;
-        }
+        let fingerprint = secret::key_file(&encryption.fingerprint_key_file).ok()?;
         let store = SharedRateStore::new(self.storage.clone(), max_wait);
         Some((
             Credentials::new(self.storage.clone(), keys, fingerprint),

@@ -1,22 +1,16 @@
-use llmproxy::secret::SecretBytes;
+use llmproxy::secret::{self, SecretBytes, SecretError};
 use std::io::{self, BufRead, IsTerminal, Read};
 use zeroize::Zeroizing;
 
 const MAX_CREDENTIAL_BYTES: usize = 4096;
-const KEY_BYTES: usize = 32;
 
 pub(super) fn fingerprint(
     path: &std::path::Path,
 ) -> Result<SecretBytes, Box<dyn std::error::Error + Send + Sync>> {
-    let file = std::fs::File::open(path).map_err(|_| "fingerprint key unavailable")?;
-    let mut bytes = Zeroizing::new(Vec::new());
-    file.take(u64::try_from(KEY_BYTES + 1)?)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "fingerprint key unavailable")?;
-    if bytes.len() != KEY_BYTES {
-        return Err("fingerprint key must contain exactly 32 bytes".into());
-    }
-    Ok(SecretBytes::new(std::mem::take(&mut *bytes)))
+    secret::key_file(path).map_err(|error| match error {
+        SecretError::InvalidKey => "fingerprint key must contain exactly 32 bytes".into(),
+        _ => "fingerprint key unavailable".into(),
+    })
 }
 
 pub(super) fn credential(
