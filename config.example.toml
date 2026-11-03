@@ -10,13 +10,15 @@ connect_timeout = "10s"                   # upstream dial only; response reads a
 max_body = 16777216                       # bytes; larger request bodies get 413
 tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" when tools are sent without one
 
-# Optional per-person Claude API-key adapter. Enable all three sections together.
+# Optional per-person direct Anthropic API-key adapter (not subscription/OAuth).
+# Enable all three sections together. PostgreSQL 16+; run `llmproxy db migrate`
+# with a migration role before starting runtime replicas. See README for grants.
 # --check-config validates them offline, without connecting or reading the mounted key files.
 # Namespace and key IDs use 1–63 ASCII letters, digits, underscores or hyphens.
 # [postgres]
 # url = "${DATABASE_URL}"                # postgres:// or postgresql://; use sslmode=verify-full in production
-# namespace = "llmproxy"
-# max_connections = 10                   # positive pool size; default 10
+# namespace = "llmproxy"                 # same on all cooperating replicas
+# max_connections = 10                   # per pool; budget across replicas and notification sessions
 # connect_timeout = "10s"                # positive whole seconds; default 10s
 # acquire_timeout = "10s"                # positive pool acquisition timeout; default 10s
 #
@@ -24,6 +26,9 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 # fingerprint_key_file = "/run/secrets/llmproxy-fingerprint-key"
 # active_key_id = "primary"
 # keys = { primary = "/run/secrets/llmproxy-primary" } # mounted 32-byte master key; never inline key bytes
+# Both key files contain exactly 32 random binary bytes; keep fingerprint key stable.
+# Stage new encryption keys on all replicas before changing active_key_id/reencrypting.
+# Runtime keys are loaded once: restart replicas after key-file repairs or changes.
 #
 # [claude]                               # reserves /claude; do not add a static route named claude
 # upstream = "https://api.anthropic.com"  # default; normalized with a trailing slash
@@ -62,6 +67,13 @@ headers = { Authorization = "Bearer ${OPENCODE_API_KEY}", X-Api-Key = "" }
 
 # Limits hold requests (FIFO) until budget frees. A request may match several limits.
 # Tokens are estimated as body bytes / 4. `max_inflight` caps concurrency instead of rate.
+# When Claude is enabled, this optional limit is shared per person across replicas.
+# Keep its definition identical in every replica using the same namespace.
+# [[limit]]
+# name = "claude"
+# prefixes = ["/claude/"]
+# rpm = 60
+# max_inflight = 2
 
 [[limit]]
 name = "deepseek"
