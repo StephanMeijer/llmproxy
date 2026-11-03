@@ -183,15 +183,8 @@ async fn claude(
     });
     let (state, generation) = match operation {
         Claude::Status => match record {
-            Some(record) => (
-                match record.state {
-                    CredentialState::Active => "active",
-                    CredentialState::Invalid => "invalid",
-                    CredentialState::Removed => "removed",
-                },
-                Some(record.generation),
-            ),
-            None => ("missing", None),
+            Some(record) => (json!(record.state), Some(record.generation)),
+            None => (json!("missing"), None),
         },
         Claude::Set(_) => {
             if !person.enabled {
@@ -209,7 +202,7 @@ async fn claude(
                 Some(version) => credentials.replace(version, secret).await?,
                 None => credentials.install(id, secret).await?,
             };
-            ("active", Some(version.generation))
+            (json!(CredentialState::Active), Some(version.generation))
         }
         Claude::Remove => {
             let mut record = record.ok_or("credential not found")?;
@@ -217,7 +210,7 @@ async fn claude(
             let mut tx = store.begin().await?;
             let generation = tx.set_credential_state(&record).await?;
             tx.commit().await?;
-            ("removed", Some(generation))
+            (json!(CredentialState::Removed), Some(generation))
         }
     };
     Ok(

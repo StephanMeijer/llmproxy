@@ -1,8 +1,7 @@
-use super::Credentials;
+use super::{super::envelope, Credentials};
 use crate::{
     metrics::CredentialCounts,
-    secret::CredentialEnvelope,
-    storage::{PersonId, StorageError},
+    storage::{CredentialState, PersonId, StorageError},
 };
 use sqlx::Row;
 
@@ -18,24 +17,13 @@ impl Credentials {
         tx.rollback().await?;
         let mut counts = CredentialCounts::default();
         for row in rows {
-            match row.try_get::<&str, _>("state")? {
-                "invalid" => counts.invalid += 1,
-                "removed" => counts.removed += 1,
-                "active" => {
-                    let envelope = (|| -> Result<CredentialEnvelope, StorageError> {
-                        Ok(CredentialEnvelope {
-                            version: u8::try_from(row.try_get::<i32, _>("format_version")?)
-                                .map_err(|_| StorageError::InvalidData)?,
-                            key_id: row.try_get("key_id")?,
-                            nonce: row
-                                .try_get::<Vec<u8>, _>("nonce")?
-                                .try_into()
-                                .map_err(|_| StorageError::InvalidData)?,
-                            ciphertext: row.try_get("ciphertext")?,
-                        })
-                    })();
+            match row.try_get("state")? {
+                CredentialState::Invalid => counts.invalid += 1,
+                CredentialState::Removed => counts.removed += 1,
+                CredentialState::Active => {
                     let person = PersonId(row.try_get("person_id")?);
-                    let usable = envelope.is_ok_and(|envelope| {
+                    // A malformed active envelope counts as unavailable, not as a read error.
+                    let usable = envelope(&row).is_ok_and(|envelope| {
                         self.keys.decrypt(&self.context(person), &envelope).is_ok()
                     });
                     if usable {
@@ -44,7 +32,6 @@ impl Credentials {
                         counts.unavailable += 1;
                     }
                 }
-                _ => return Err(StorageError::InvalidData),
             }
         }
         Ok(counts)
