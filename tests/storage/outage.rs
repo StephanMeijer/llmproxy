@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../common/healthy.rs"]
+mod healthy;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
 use llmproxy::{config::PostgresConfig, storage::StorageError};
@@ -168,31 +170,18 @@ async fn static_binary_starts_and_serves_while_database_is_absent() {
     let path = env::temp_dir().join(format!("storage-static-{}.toml", Uuid::new_v4()));
     fs::write(&path,format!("listen='127.0.0.1:{port}'\nproxy_token='test'\n[postgres]\nurl='postgres://127.0.0.1:1/absent'\nnamespace='test'\n")).unwrap();
     // When the real binary starts.
-    let server = Server(
+    let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_llmproxy"))
             .arg(&path)
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap(),
     );
-    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}");
     // A restarted server can take well over LONG to accept connections on a loaded host.
-    let deadline = tokio::time::Instant::now() + LONG * 6;
-    loop {
-        if let Ok(response) = client
-            .get(format!("http://127.0.0.1:{port}/missing"))
-            .send()
-            .await
-        {
-            assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "static listener did not start"
-        );
-        tokio::task::yield_now().await;
-    }
+    healthy::wait_healthy(&base, &mut server.0, LONG * 6).await;
+    let response = reqwest::get(format!("{base}/missing")).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     // Then serving a static request required no database connection.
     drop(server);
     fs::remove_file(path).unwrap();

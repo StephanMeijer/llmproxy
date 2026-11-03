@@ -1,3 +1,5 @@
+#[path = "../common/healthy.rs"]
+mod healthy;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
 use std::{
@@ -34,26 +36,7 @@ impl Replica {
             base: format!("http://{address}"),
             config: config.into(),
         };
-        tokio::time::timeout(super::WAIT, async {
-            let client = reqwest::Client::new();
-            loop {
-                assert!(
-                    replica.child.try_wait().unwrap().is_none(),
-                    "replica exited before healthy"
-                );
-                if client
-                    .get(format!("{}/healthz", replica.base))
-                    .send()
-                    .await
-                    .is_ok_and(|r| r.status().is_success())
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
+        healthy::wait_healthy(&replica.base, &mut replica.child, super::WAIT).await;
         replica
     }
 

@@ -1,4 +1,6 @@
 use super::support::{Fixture, LEGACY};
+#[path = "../common/healthy.rs"]
+mod healthy;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
 use std::time::Duration;
@@ -39,20 +41,7 @@ pub async fn binary_scenario() {
         .build()
         .unwrap();
     let base = format!("http://{listen}");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if client.get(format!("{base}/healthz")).send().await.is_ok() {
-                break;
-            }
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "proxy exited before health"
-            );
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    healthy::wait_healthy(&base, &mut child, Duration::from_secs(5)).await;
     check_authenticated_paths(&client, &fixture, &base).await;
     postgres_available(&client, &metrics, true).await;
     fixture.storage.close().await;
