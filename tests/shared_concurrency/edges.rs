@@ -19,7 +19,7 @@ async fn lease_cancellation_runs_live_work_and_rejects_expired_work() {
     let expired = LeaseGuard::start(
         storage.clone(),
         (key, lease),
-        Instant::now() - Duration::from_secs(31),
+        Instant::now() - (LEASE_LIFETIME + Duration::from_secs(1)),
     );
     assert_eq!(
         expired

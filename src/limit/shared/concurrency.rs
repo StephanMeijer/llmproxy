@@ -10,7 +10,8 @@ use crate::storage::{FencedLease, LEASE_LIFETIME, LimitKey, Storage, StorageErro
 mod lease_stream;
 pub use lease_stream::LeaseStreamError;
 
-const RENEW_EVERY: Duration = Duration::from_secs(10);
+/// How often a held lease is renewed; tests schedule around this.
+pub const RENEW_EVERY: Duration = Duration::from_secs(10);
 const RETRY_EVERY: Duration = Duration::from_secs(1);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const EXPIRY_MARGIN: Duration = Duration::from_secs(1);
