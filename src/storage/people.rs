@@ -60,14 +60,19 @@ impl StorageTransaction {
     /// Stores a verifier, never a plaintext proxy token.
     /// # Errors
     /// Returns a sanitized constraint or database error.
-    pub async fn create_token(&mut self, token: &TokenRecord) -> Result<(), StorageError> {
+    pub async fn create_token(
+        &mut self,
+        id: TokenId,
+        person: PersonId,
+        secret_hash: &str,
+    ) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO proxy_tokens(namespace,id,person_id,secret_hash) VALUES ($1,$2,$3,$4)",
         )
         .bind(&self.namespace)
-        .bind(token.id)
-        .bind(token.person_id)
-        .bind(&token.secret_hash)
+        .bind(id)
+        .bind(person)
+        .bind(secret_hash)
         .execute(&mut *self.tx)
         .await?;
         Ok(())

@@ -1,7 +1,7 @@
 use super::*;
 use llmproxy::storage::{
     FencedLease, Lease, LimitKey, OwnerId, RateKind, RateState, ReservationId, StorageError,
-    TokenId, TokenRecord,
+    TokenId,
 };
 
 #[tokio::test]
@@ -10,15 +10,9 @@ async fn people_tokens_and_ciphertext_roundtrip_without_plaintext() {
     let (db, store, person) = setup().await;
     let token_id = TokenId(Uuid::new_v4());
     let mut tx = store.begin().await.unwrap();
-    tx.create_token(&TokenRecord {
-        id: token_id,
-        person_id: person,
-        secret_hash: "$argon2id$test-verifier".into(),
-        revoked: false,
-        person_enabled: true,
-    })
-    .await
-    .unwrap();
+    tx.create_token(token_id, person, "$argon2id$test-verifier")
+        .await
+        .unwrap();
     tx.insert_credential(&credential(person), &[8; 32])
         .await
         .unwrap();
@@ -43,15 +37,7 @@ async fn auth_reads_observe_disable_and_revocation_without_cache() {
     let (db, store, person) = setup().await;
     let id = TokenId(Uuid::new_v4());
     let mut tx = store.begin().await.unwrap();
-    tx.create_token(&TokenRecord {
-        id,
-        person_id: person,
-        secret_hash: "$argon2id$test".into(),
-        revoked: false,
-        person_enabled: true,
-    })
-    .await
-    .unwrap();
+    tx.create_token(id, person, "$argon2id$test").await.unwrap();
     tx.commit().await.unwrap();
     // When the person is disabled and token revoked transactionally.
     let mut tx = store.begin().await.unwrap();

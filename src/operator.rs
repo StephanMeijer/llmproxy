@@ -5,7 +5,6 @@ use llmproxy::{
     secret::{KeyRing, ProxyToken, TokenHasher},
     storage::{
         CredentialState, CredentialVersion, Credentials, Person, PersonId, Storage, TokenId,
-        TokenRecord,
     },
 };
 use serde_json::{Value, json};
@@ -122,14 +121,8 @@ async fn execute(
             if !person.enabled {
                 return Err("person is disabled".into());
             }
-            tx.create_token(&TokenRecord {
-                id: TokenId(token.id()),
-                person_id: id,
-                secret_hash,
-                revoked: false,
-                person_enabled: true,
-            })
-            .await?;
+            tx.create_token(TokenId(token.id()), id, &secret_hash)
+                .await?;
             tx.commit().await?;
             Ok(Output::Issued { person, token })
         }
