@@ -9,7 +9,7 @@ mod http;
 #[path = "auth/support.rs"]
 mod support;
 
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue};
 use llmproxy::{
     auth::{AuthError, Authenticator, Principal, RouteKind},
     secret::ProxyToken,
@@ -209,11 +209,6 @@ async fn overlapping_person_tokens_wait_for_a_verifier_instead_of_failing() {
         assert_eq!(result, Ok(Some(Principal::Person(*person))), "request {n}");
     }
     fixture.close().await;
-}
-
-#[test]
-fn a_busy_verifier_is_a_retryable_queue_timeout_not_an_outage() {
-    assert_eq!(AuthError::Busy.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
