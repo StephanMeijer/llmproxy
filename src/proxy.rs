@@ -26,7 +26,7 @@ use tokio::{
 };
 
 use crate::{
-    auth::{AuthError, Authenticator, RouteKind},
+    auth::{AuthError, Authenticator, MAX_VERIFY_WAIT, RouteKind},
     config::{Config, ConfigError},
     limit::Limits,
     metrics::CredentialMetrics,
@@ -424,6 +424,12 @@ impl Proxy {
                     AuthError::Unauthorized => "unauthorized",
                     AuthError::Forbidden => "forbidden",
                     AuthError::Unavailable => "authentication_unavailable",
+                    AuthError::Busy => {
+                        return (
+                            LABEL_OTHER,
+                            queue_timeout(self.max_wait.min(MAX_VERIFY_WAIT)),
+                        );
+                    }
                 };
                 return (
                     LABEL_OTHER,

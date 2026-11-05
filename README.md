@@ -48,7 +48,7 @@ Any string value may contain `${VAR}`, filled in from the environment. An unset 
 | `listen` | required | Address for client traffic, e.g. `"0.0.0.0:8788"`. |
 | `metrics_listen` | none | Address for Prometheus metrics. No metrics listener when unset. |
 | `proxy_token` | required | Legacy shared token for static routes; cannot access Claude. |
-| `max_wait` | `"120s"` | Longest a request is held by a limit before `429`. Whole seconds, written like `"120s"`. |
+| `max_wait` | `"120s"` | Longest a request is held by a limit before `429`. Whole seconds, written like `"120s"`. Waiting for a personal-token verifier is separate and capped at the shorter of `max_wait` and 10 s. |
 | `connect_timeout` | `"10s"` | Upstream dial timeout. Reading a response is never cut off, so long streams are safe. |
 | `max_body` | `16777216` | Largest request body in bytes. Larger gets `413`. |
 | `tool_choice_prefix` | none | See [tool_choice](#tool_choice-shim). |
@@ -81,7 +81,7 @@ Definitions persist in PostgreSQL. Restarting all replicas with a changed defini
 
 ## Behaviour
 
-**Authentication.** `Authorization: Bearer <token>` or `x-api-key: <token>`. Legacy tokens are compared without short-circuiting on the first differing byte; personal tokens are verified against stored hashes. Authentication runs before forwarding, so an unknown path without a token gets `401`, not `404`. Duplicate or conflicting authentication headers get `401`. `/healthz` needs no token.
+**Authentication.** `Authorization: Bearer <token>` or `x-api-key: <token>`. Legacy tokens are compared without short-circuiting on the first differing byte; personal tokens are verified against stored hashes, at most 4 at a time (one per CPU on smaller hosts); further personal-token requests queue in arrival order for up to 10 s (or `max_wait`, if shorter), then get `429`. Authentication runs before forwarding, so an unknown path without a token gets `401`, not `404`. Duplicate or conflicting authentication headers get `401`. `/healthz` needs no token.
 
 **Header hygiene.** Not forwarded: the client's `Authorization`, `x-api-key`, `Host`, `Forwarded`, `X-Forwarded-*`, `X-Real-Ip`, and hop-by-hop headers. Upstream redirects are not followed, so a redirect cannot carry your credential elsewhere.
 
@@ -114,7 +114,7 @@ Errors the proxy produces itself are JSON: `{"error": {"type": "...", "message":
 | 403 | `forbidden` | The legacy shared token attempted a Claude request. |
 | 404 | `not_found` | No route matches. |
 | 413 | `body_too_large` | Body over `max_body` (or unreadable). |
-| 429 | `queue_timeout` | Held for `max_wait`. `Retry-After` is `max_wait` in seconds. |
+| 429 | `queue_timeout` | Held for `max_wait`, or no personal-token verifier freed up within the shorter of `max_wait` and 10 s. `Retry-After` is that wait in seconds. |
 | 502 | `upstream_error` | The upstream could not be reached. |
 | 503 | `authentication_unavailable`, `adapter_unavailable` | PostgreSQL/schema/limit configuration unavailable, or Claude credential missing, invalid, removed or undecryptable. |
 

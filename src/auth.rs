@@ -5,7 +5,7 @@ use std::{num::NonZeroUsize, thread, time::Duration};
 use axum::http::{HeaderMap, StatusCode, header};
 
 use crate::{
-    secret::{ProxyToken, TokenHasher},
+    secret::{ProxyToken, SecretError, TokenHasher},
     storage::{PersonId, Storage, StorageError, TokenId},
 };
 
@@ -13,6 +13,8 @@ const BEARER_PREFIX: &str = "Bearer ";
 const API_KEY_HEADER: &str = "x-api-key";
 /// Caps verifier memory at 4 x 64 MiB (`MAX_HASH_MEMORY_KIB`) whatever the host's core count.
 const MAX_VERIFIERS: usize = 4;
+/// Longest a request queues for a verifier; it is not taken from the limits' `max_wait`.
+pub const MAX_VERIFY_WAIT: Duration = Duration::from_secs(10);
 
 /// Authority derived exclusively from the supplied proxy token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +38,8 @@ pub enum AuthError {
     Unauthorized,
     Forbidden,
     Unavailable,
+    /// Every verifier stayed busy for the whole verifier wait.
+    Busy,
 }
 
 impl AuthError {
@@ -45,6 +49,7 @@ impl AuthError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Busy => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 }
@@ -58,8 +63,8 @@ pub struct Authenticator {
 
 impl Authenticator {
     /// Builds local authority and, given the process's shared storage, a personal-token verifier.
-    /// Verifications run one per CPU, at most `MAX_VERIFIERS`; a request waits up to `max_wait` for
-    /// one to free up.
+    /// Verifications run one per CPU, at most `MAX_VERIFIERS`; a request waits for one up to
+    /// `max_wait` or `MAX_VERIFY_WAIT`, whichever is shorter.
     #[must_use]
     pub fn new(legacy: String, storage: Option<Storage>, max_wait: Duration) -> Self {
         let workers = thread::available_parallelism().map_or(1, |n| n.get().min(MAX_VERIFIERS));
@@ -67,14 +72,15 @@ impl Authenticator {
         Self {
             legacy,
             storage,
-            hasher: TokenHasher::new(workers).waiting(max_wait),
+            hasher: TokenHasher::new(workers).waiting(max_wait.min(MAX_VERIFY_WAIT)),
         }
     }
 
     /// Health is public; every other route requires one unambiguous token.
     /// # Errors
     /// Returns unauthorized for invalid tokens, forbidden for legacy Claude access,
-    /// or unavailable when the database or verifier cannot establish authority.
+    /// unavailable when the database or verifier cannot establish authority, or busy when no
+    /// verifier frees up in time.
     pub async fn authenticate(
         &self,
         route: RouteKind,
@@ -112,7 +118,10 @@ impl Authenticator {
             .hasher
             .verify(&token, &record.secret_hash)
             .await
-            .map_err(|_| AuthError::Unavailable)?
+            .map_err(|error| match error {
+                SecretError::Busy => AuthError::Busy,
+                _ => AuthError::Unavailable,
+            })?
         {
             return Err(AuthError::Unauthorized);
         }
