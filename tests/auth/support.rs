@@ -2,7 +2,7 @@ use super::database;
 use llmproxy::{
     config::PostgresConfig,
     secret::{ProxyToken, TokenHasher},
-    storage::{self, PersonId, Storage, TokenId, TokenRecord},
+    storage::{self, PersonId, Storage, TokenId},
 };
 use std::{num::NonZeroUsize, time::Duration};
 use uuid::Uuid;
@@ -46,13 +46,11 @@ impl Fixture {
             (&revoked, alice_id),
             (&disabled, disabled_id),
         ] {
-            tx.create_token(&TokenRecord {
-                id: TokenId(token.id()),
+            tx.create_token(
+                TokenId(token.id()),
                 person_id,
-                secret_hash: hasher.hash(token).await.unwrap(),
-                revoked: false,
-                person_enabled: true,
-            })
+                &hasher.hash(token).await.unwrap(),
+            )
             .await
             .unwrap();
         }

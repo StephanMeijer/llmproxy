@@ -9,7 +9,7 @@ use axum::{
 };
 use llmproxy::{
     secret::{KeyRing, ProxyToken, SecretBytes, TokenHasher},
-    storage::{self, CredentialVersion, Credentials, PersonId, Storage, TokenId, TokenRecord},
+    storage::{self, CredentialVersion, Credentials, PersonId, Storage, TokenId},
 };
 use std::{
     fs,
@@ -79,15 +79,9 @@ impl Fixture {
         let bob_id = PersonId(Uuid::new_v4());
         for (id, label, token) in [(alice_id, "Alice", &alice), (bob_id, "Bob", &bob)] {
             tx.create_person(id, label).await.unwrap();
-            tx.create_token(&TokenRecord {
-                id: TokenId(token.id()),
-                person_id: id,
-                secret_hash: hasher.hash(token).await.unwrap(),
-                revoked: false,
-                person_enabled: true,
-            })
-            .await
-            .unwrap();
+            tx.create_token(TokenId(token.id()), id, &hasher.hash(token).await.unwrap())
+                .await
+                .unwrap();
         }
         tx.commit().await.unwrap();
         let keys = KeyRing::new(
