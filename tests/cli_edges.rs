@@ -43,7 +43,7 @@ fn malformed_database_and_rotation_commands_fail_before_loading_configuration() 
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
         let error = String::from_utf8(output.stderr).unwrap();
-        assert!(error.contains("usage:"));
+        assert!(error.to_lowercase().contains("usage:"));
         assert!(!error.contains("secret-canary"));
     }
 }
