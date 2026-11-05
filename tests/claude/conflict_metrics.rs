@@ -51,7 +51,7 @@ async fn divergent_replica_conflicts_increment_only_its_bounded_counter() {
         assert!(!body.contains("limit-private-canary"));
         println!("DIVERGENT_CLAUDE status=503 body={body}");
     }
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     let request = tokio::spawn(
         reqwest::Client::new()
             .post(format!("{}/static/v1/messages", divergent.base))
@@ -144,7 +144,7 @@ async fn queue_timeout_does_not_count_as_conflict() {
     assert!(elapsed <= QUEUE_RESPONSE_LIMIT, "{elapsed:?}");
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(response.text().await.unwrap().contains("queue_timeout"));
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     conflicts(&f, &binary, "conflict-queue-timeout", 0).await;
     artifact(
         "conflict-queue.txt",

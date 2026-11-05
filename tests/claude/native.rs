@@ -76,7 +76,7 @@ async fn retry_beyond_deadline_preserves_provider_429_and_headers() {
         response.text().await.unwrap(),
         "{\"error\":{\"type\":\"rate_limit_error\"}}"
     );
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     artifact(
         "429-native.txt",
         "PASS provider429 exact error and Retry-After60 preserved, zero retries\n",

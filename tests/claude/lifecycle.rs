@@ -79,7 +79,7 @@ async fn invalid_key_401_affects_later_requests_but_403_does_not() {
         request.await.unwrap().unwrap().text().await.unwrap(),
         "bob-ok"
     );
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     artifact(
         "invalid-key.txt",
         "PASS upstream401 current status/error/headers preserved; later503 no hit; 403 remains active and Bob unaffected\n",

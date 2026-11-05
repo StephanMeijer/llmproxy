@@ -30,7 +30,7 @@ async fn provisioning_rotation_restart_preserve_native_tools_and_sse() {
     let body: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(body.pointer("/usage/input_tokens").unwrap(), 7);
     clients.spawn(f.request(&b, 1).send());
-    let send = stream(f.hit().await);
+    let (send, _) = stream(f.hit().await);
     send.send(Bytes::from_static(FIRST)).await.unwrap();
     let mut response = clients.join_next().await.unwrap().unwrap().unwrap();
     assert_eq!(response.chunk().await.unwrap().unwrap(), FIRST);

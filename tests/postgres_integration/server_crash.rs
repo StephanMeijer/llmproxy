@@ -150,7 +150,7 @@ async fn killed_postgres_restarts_durably_and_both_live_replicas_recover() {
         .unwrap();
     let mut clients = JoinSet::new();
     clients.spawn(f.request(&a, 0).send());
-    let send = stream(f.hit().await);
+    let (send, _) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: active\n\n"))
         .await
         .unwrap();

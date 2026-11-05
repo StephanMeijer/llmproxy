@@ -39,7 +39,7 @@ async fn earlier_lease_loss_cancels_later_limit_wait_before_upstream() {
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     f.state_count("fifo_waiters", 0).await;
     let mut tx = f.storage.begin().await.unwrap();
     tx.release_concurrency(&key, &reservation).await.unwrap();
@@ -79,7 +79,7 @@ async fn lease_loss_cancels_retry_delay_without_another_provider_hit() {
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert!(f.hits.try_recv().is_err());
+    assert!(f.provider.hits.try_recv().is_err());
     f.state_count("concurrency_leases", 0).await;
     artifact(
         "retry-cancellation.txt",

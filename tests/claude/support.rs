@@ -1,45 +1,31 @@
 use super::database;
 #[path = "../common/evidence.rs"]
 mod evidence;
+#[path = "../common/fake_provider.rs"]
+mod provider;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
-use axum::{
-    body::{Body, Bytes, to_bytes},
-    extract::Request,
-    http::{HeaderMap, StatusCode},
-    response::Response,
-};
+use axum::http::StatusCode;
 pub use evidence::artifact;
 use llmproxy::{
     secret::{KeyRing, ProxyToken, SecretBytes, TokenHasher},
     storage::{self, CredentialVersion, Credentials, PersonId, Storage, TokenId},
 };
+pub use provider::{Hit, reply, stream};
 use std::{
     fs,
     num::NonZeroUsize,
     path::PathBuf,
     process::{Child, Command},
-    sync::Arc,
     time::Duration,
 };
-use tokio::{
-    net::TcpListener,
-    sync::{mpsc, oneshot},
-    task::JoinSet,
-};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 pub const WAIT: Duration = Duration::from_secs(20);
 pub const BODY: &str = "{ \"model\": \"claude-test\", \"messages\": [{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}], \"tools\": [{\"name\":\"weather\",\"input_schema\":{\"type\":\"object\"}}], \"max_tokens\": 25 }\n";
 pub const ALICE_KEY: &[u8] = b"fake-claude-alice-task13";
 pub const BOB_KEY: &[u8] = b"fake-claude-bob-task13";
-
-pub struct Hit {
-    pub path: String,
-    pub headers: HeaderMap,
-    pub body: Bytes,
-    pub reply: oneshot::Sender<Response>,
-}
 
 pub struct Binary {
     pub base: String,
@@ -66,11 +52,10 @@ pub struct Fixture {
     pub bob: ProxyToken,
     pub alice_version: CredentialVersion,
     pub bob_version: CredentialVersion,
-    pub hits: mpsc::Receiver<Hit>,
+    pub provider: provider::Provider,
     upstream: String,
     key: PathBuf,
     pepper: PathBuf,
-    servers: JoinSet<()>,
 }
 impl Fixture {
     pub async fn new() -> Self {
@@ -108,31 +93,8 @@ impl Fixture {
         let pepper = db.path.with_extension("pepper");
         fs::write(&key, [1; 32]).unwrap();
         fs::write(&pepper, [2; 32]).unwrap();
-        let (send, hits) = mpsc::channel(16);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let upstream = format!("http://{}/native/", listener.local_addr().unwrap());
-        let mut servers = JoinSet::new();
-        servers.spawn(async move {
-            let app = axum::Router::new().fallback(move |req: Request| {
-                let send = send.clone();
-                async move {
-                    let (parts, body) = req.into_parts();
-                    let (reply, response) = oneshot::channel();
-                    send.send(Hit {
-                        path: parts.uri.to_string(),
-                        headers: parts.headers,
-                        body: to_bytes(body, 1024 * 1024).await.unwrap(),
-                        reply,
-                    })
-                    .await
-                    .unwrap();
-                    response
-                        .await
-                        .unwrap_or_else(|_| Response::new(Body::empty()))
-                }
-            });
-            axum::serve(listener, app).await.unwrap();
-        });
+        let provider = provider::Provider::new(false).await;
+        let upstream = format!("{}/native/", provider.url);
         Self {
             db,
             storage,
@@ -141,11 +103,10 @@ impl Fixture {
             bob,
             alice_version,
             bob_version,
-            hits,
+            provider,
             upstream,
             key,
             pepper,
-            servers,
         }
     }
 
@@ -197,14 +158,11 @@ impl Fixture {
     }
 
     pub async fn hit(&mut self) -> Hit {
-        tokio::time::timeout(WAIT, self.hits.recv())
-            .await
-            .unwrap()
-            .unwrap()
+        self.provider.hit().await
     }
 
     pub async fn stop_upstream(&mut self) {
-        self.servers.shutdown().await;
+        self.provider.stop().await;
     }
 
     pub fn request(&self, binary: &Binary, bob: bool) -> reqwest::RequestBuilder {
@@ -257,43 +215,10 @@ impl Fixture {
             }
             fs::remove_file(log).unwrap();
         }
-        self.servers.shutdown().await;
+        self.provider.stop().await;
         self.storage.close().await;
         fs::remove_file(self.key).unwrap();
         fs::remove_file(self.pepper).unwrap();
         self.db.close().await;
     }
-}
-
-pub fn reply(hit: Hit, status: StatusCode, body: &'static str) {
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert("request-id", "provider-request".parse().unwrap());
-    assert!(hit.reply.send(response).is_ok());
-}
-
-pub struct Dropped(pub Arc<tokio::sync::Notify>);
-impl Drop for Dropped {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
-
-pub fn stream(hit: Hit) -> (mpsc::Sender<Bytes>, Arc<tokio::sync::Notify>) {
-    let (send, recv) = mpsc::channel(1);
-    let dropped = Arc::new(tokio::sync::Notify::new());
-    let guard = Dropped(Arc::clone(&dropped));
-    let body = futures_util::stream::unfold((recv, guard), |(mut recv, guard)| async move {
-        recv.recv()
-            .await
-            .map(|bytes| (Ok::<_, std::io::Error>(bytes), (recv, guard)))
-    });
-    let mut response = Response::new(Body::from_stream(body));
-    response
-        .headers_mut()
-        .insert("content-type", "text/event-stream".parse().unwrap());
-    assert!(hit.reply.send(response).is_ok());
-    (send, dropped)
 }

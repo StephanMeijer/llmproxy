@@ -28,7 +28,7 @@ impl Fixture {
     }
 
     pub async fn with_database(scenario: &'static str, db: Database) -> Self {
-        let provider = Provider::new().await;
+        let provider = Provider::new(true).await;
         for (name, byte) in [("old", 1), ("new", 2), ("fingerprint", 3)] {
             fs::write(db.directory.join(name), [byte; 32]).unwrap();
         }
@@ -109,15 +109,13 @@ impl Fixture {
 
     pub async fn hit(&mut self) -> Hit {
         let hit = self.provider.hit().await;
-        let person = if hit.key == ALICE.as_bytes() {
+        let key = hit.headers.get("x-api-key").unwrap().as_bytes();
+        let person = if key == ALICE.as_bytes() {
             "alice"
-        } else if hit.key == BOB.as_bytes() {
+        } else if key == BOB.as_bytes() {
             "bob"
         } else {
-            assert!(
-                hit.key == REPLACEMENT.as_bytes(),
-                "unknown provider credential"
-            );
+            assert!(key == REPLACEMENT.as_bytes(), "unknown provider credential");
             "replacement"
         };
         let body: Value = serde_json::from_slice(&hit.body).unwrap();
