@@ -225,6 +225,15 @@ async fn limit_commits_wake_only_waiters_on_the_same_limit() {
         .await
         .unwrap()
         .unwrap();
+    // When one transaction locks Bob's limit then Alice's, its commit still wakes Bob's waiter.
+    let mut tx = store.begin().await.unwrap();
+    tx.lock_limit(&key(bob)).await.unwrap();
+    tx.lock_limit(&key(alice)).await.unwrap();
+    tx.commit().await.unwrap();
+    tokio::time::timeout(LONG, waiter.changed(LONG * 4))
+        .await
+        .unwrap()
+        .unwrap();
     // Unscoped and unknown payloads fail open and wake it too.
     for payload in ["", "garbage"] {
         sqlx::query("SELECT pg_notify('llmproxy_storage', $1)")
