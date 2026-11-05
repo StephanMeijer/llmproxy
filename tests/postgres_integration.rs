@@ -6,6 +6,8 @@ mod acknowledgement;
 mod admission;
 #[path = "common/database.rs"]
 mod database;
+#[path = "common/eventually.rs"]
+mod eventually;
 #[path = "common/evidence.rs"]
 mod evidence;
 #[path = "postgres_integration/faults.rs"]

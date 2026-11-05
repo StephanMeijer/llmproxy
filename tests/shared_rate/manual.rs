@@ -89,20 +89,13 @@ async fn manual_alternating_replicas_preserve_committed_fifo_at_http_upstream() 
         hits.lock().unwrap()
     );
     f.waiters(0).await;
-    tokio::time::timeout(LONG, async {
-        loop {
-            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM concurrency_leases")
-                .fetch_one(&f.db.pool)
-                .await
-                .unwrap();
-            if count == 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    super::eventually::count_eventually(
+        &f.db.pool,
+        "SELECT count(*) FROM concurrency_leases",
+        0,
+        LONG,
+    )
+    .await;
     server.shutdown().await;
     f.close().await;
 }

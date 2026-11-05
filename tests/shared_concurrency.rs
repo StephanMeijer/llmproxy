@@ -6,6 +6,8 @@ mod database;
 mod database_close;
 #[path = "shared_concurrency/edges.rs"]
 mod edges;
+#[path = "common/eventually.rs"]
+mod eventually;
 #[path = "shared_concurrency/migration.rs"]
 mod migration;
 #[path = "shared_concurrency/process.rs"]
@@ -51,22 +53,10 @@ async fn setup() -> (database::Database, Storage, LimitKey) {
 }
 
 async fn eventually_count(pool: &sqlx::PgPool, table: &str, expected: i64) {
-    tokio::time::timeout(BOUND, async {
-        loop {
-            let query = match table {
-                "leases" => {
-                    "SELECT count(*) FROM concurrency_leases WHERE expires_at>clock_timestamp()"
-                }
-                "waiters" => "SELECT count(*) FROM fifo_waiters WHERE expires_at>clock_timestamp()",
-                _ => unreachable!(),
-            };
-            let count: i64 = sqlx::query_scalar(query).fetch_one(pool).await.unwrap();
-            if count == expected {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let query = match table {
+        "leases" => "SELECT count(*) FROM concurrency_leases WHERE expires_at>clock_timestamp()",
+        "waiters" => "SELECT count(*) FROM fifo_waiters WHERE expires_at>clock_timestamp()",
+        _ => unreachable!(),
+    };
+    eventually::count_eventually(pool, query, expected, BOUND).await;
 }

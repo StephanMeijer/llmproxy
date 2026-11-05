@@ -181,20 +181,7 @@ impl Fixture {
 
     pub async fn state_count(&self, table: &str, count: i64) {
         let query = format!("SELECT count(*) FROM {table}");
-        tokio::time::timeout(WAIT, async {
-            loop {
-                let actual: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
-                    .fetch_one(&self.db.pool)
-                    .await
-                    .unwrap();
-                if actual == count {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        super::eventually::count_eventually(&self.db.pool, &query, count, WAIT).await;
     }
 
     pub async fn close(mut self, binaries: Vec<Binary>) {
