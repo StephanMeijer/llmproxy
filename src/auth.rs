@@ -11,6 +11,8 @@ use crate::{
 
 const BEARER_PREFIX: &str = "Bearer ";
 const API_KEY_HEADER: &str = "x-api-key";
+/// Caps verifier memory at 4 x 64 MiB (`MAX_HASH_MEMORY_KIB`) whatever the host's core count.
+const MAX_VERIFIERS: usize = 4;
 
 /// Authority derived exclusively from the supplied proxy token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,10 +58,12 @@ pub struct Authenticator {
 
 impl Authenticator {
     /// Builds local authority and, given the process's shared storage, a personal-token verifier.
-    /// Verifications run one per CPU; a request waits up to `max_wait` for one to free up.
+    /// Verifications run one per CPU, at most `MAX_VERIFIERS`; a request waits up to `max_wait` for
+    /// one to free up.
     #[must_use]
     pub fn new(legacy: String, storage: Option<Storage>, max_wait: Duration) -> Self {
-        let workers = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+        let workers = thread::available_parallelism().map_or(1, |n| n.get().min(MAX_VERIFIERS));
+        let workers = NonZeroUsize::new(workers).unwrap_or(NonZeroUsize::MIN);
         Self {
             legacy,
             storage,
