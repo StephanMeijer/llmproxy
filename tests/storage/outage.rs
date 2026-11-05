@@ -28,9 +28,10 @@ impl Drop for Container {
     fn drop(&mut self) {
         let output = Command::new("docker")
             .args(["rm", "-f", "-v", &self.0])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
+            .output();
+        if !std::thread::panicking() {
+            assert!(output.unwrap().status.success());
+        }
     }
 }
 

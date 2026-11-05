@@ -109,7 +109,11 @@ impl Drop for Database {
                     admin.close().await;
                 });
         });
-        assert!(cleanup.join().is_ok(), "isolated database cleanup failed");
-        fs::remove_dir_all(&self.directory).unwrap();
+        let cleaned = cleanup.join();
+        let removed = fs::remove_dir_all(&self.directory);
+        if !std::thread::panicking() {
+            assert!(cleaned.is_ok(), "isolated database cleanup failed");
+            removed.unwrap();
+        }
     }
 }

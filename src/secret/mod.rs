@@ -8,7 +8,7 @@ pub use token::{ProxyToken, TokenHasher};
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
-use std::fmt;
+use std::{fmt, io::Read, path::Path};
 use zeroize::Zeroizing;
 
 const KEY_BYTES: usize = 32;
@@ -70,6 +70,23 @@ impl fmt::Display for SecretError {
     }
 }
 impl std::error::Error for SecretError {}
+
+/// Reads a raw 32-byte key file into zeroizing memory.
+/// Restrict the file to the service account (for example Unix mode 0600).
+/// # Errors
+/// Returns `KeyFile` when the file cannot be read and `InvalidKey` unless it
+/// holds exactly 32 bytes.
+pub fn key_file(path: &Path) -> Result<SecretBytes, SecretError> {
+    let file = std::fs::File::open(path).map_err(|_| SecretError::KeyFile)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(KEY_BYTES + 1));
+    file.take(u64::try_from(KEY_BYTES + 1).map_err(|_| SecretError::InvalidKey)?)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SecretError::KeyFile)?;
+    if bytes.len() != KEY_BYTES {
+        return Err(SecretError::InvalidKey);
+    }
+    Ok(SecretBytes(bytes))
+}
 
 fn random<const N: usize>() -> Result<[u8; N], SecretError> {
     let mut bytes = [0; N];

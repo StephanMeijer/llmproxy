@@ -8,7 +8,7 @@ pub use accounting::{AccountingError, FixedBucket, UNITS_PER_TOKEN};
 pub use admission::{Admission, AdmissionStore, PendingAdmission, SharedCharge, SharedRequest};
 pub use admission::{SharedAdmissionError, SharedRateStore};
 pub use concurrency::{
-    LeaseCancellation, LeaseCancellations, LeaseGuard, LeaseLost, LeaseStreamError,
+    LeaseCancellation, LeaseCancellations, LeaseGuard, LeaseLost, LeaseStreamError, RENEW_EVERY,
 };
 
 use serde::Serialize;

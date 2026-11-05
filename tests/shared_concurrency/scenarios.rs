@@ -23,7 +23,7 @@ async fn two_process_stream_lifecycle() {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(RENEW_EVERY + Duration::from_secs(5), async {
         loop {
             let renewed: bool = sqlx::query_scalar(
                 "SELECT extract(epoch FROM expires_at)::float8>$1 FROM concurrency_leases",
@@ -91,7 +91,7 @@ async fn killed_process_recovers_only_after_database_expiry() {
     assert!(!tokio::time::timeout(BOUND, drain(held)).await.unwrap());
     // Then B cannot pass the still-live row and acquires after its server-time expiry.
     let started = Instant::now();
-    let response = tokio::time::timeout(Duration::from_secs(35), async {
+    let response = tokio::time::timeout(LEASE_LIFETIME + Duration::from_secs(5), async {
         loop {
             let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM concurrency_leases WHERE id=$1 AND expires_at>clock_timestamp())").bind(old).fetch_one(&db.pool).await.unwrap();
             if !live { break; }
@@ -108,7 +108,7 @@ async fn killed_process_recovers_only_after_database_expiry() {
     .await
     .unwrap();
     assert!(new_created >= expiry);
-    assert!(started.elapsed() >= Duration::from_secs(28));
+    assert!(started.elapsed() + Duration::from_secs(2) >= LEASE_LIFETIME);
     println!(
         "OBSERVED killed_owner recovery_ms={} B_created_after_authoritative_expiry=true",
         started.elapsed().as_millis()
@@ -150,7 +150,7 @@ async fn database_network_partition_cancels_stream_before_confirmed_expiry() {
     assert!(bridge.await.unwrap_err().is_cancelled());
     let started = Instant::now();
     assert!(
-        !tokio::time::timeout(Duration::from_secs(30), drain(held))
+        !tokio::time::timeout(LEASE_LIFETIME, drain(held))
             .await
             .unwrap()
     );

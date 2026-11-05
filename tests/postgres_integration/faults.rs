@@ -38,7 +38,7 @@ async fn database_outage_cancels_renewal_and_recovers_while_static_continues() {
     );
     f.static_ok(&a).await;
     f.static_ok(&b).await;
-    tokio::time::timeout(std::time::Duration::from_secs(30), send.closed())
+    tokio::time::timeout(llmproxy::storage::LEASE_LIFETIME, send.closed())
         .await
         .unwrap();
     let cancelled_after = start.elapsed().as_secs_f64();

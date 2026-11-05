@@ -1,12 +1,11 @@
-use super::{KEY_BYTES, SecretBytes, SecretError, random};
+use super::{KEY_BYTES, SecretBytes, SecretError, key_file, random};
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt, io::Read, path::PathBuf};
+use std::{collections::BTreeMap, fmt, path::PathBuf};
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 const ENVELOPE_VERSION: u8 = 1;
 const NONCE_BYTES: usize = 12;
@@ -77,15 +76,10 @@ impl KeyRing {
     /// # Errors
     /// Returns redacted `KeyFile`, `InvalidKey`, or `UnknownKey` without paths.
     pub fn load(active: &str, paths: &BTreeMap<String, PathBuf>) -> Result<Self, SecretError> {
-        let mut keys = BTreeMap::new();
-        for (id, path) in paths {
-            let file = std::fs::File::open(path).map_err(|_| SecretError::KeyFile)?;
-            let mut bytes = Zeroizing::new(Vec::with_capacity(KEY_BYTES + 1));
-            file.take(u64::try_from(KEY_BYTES + 1).map_err(|_| SecretError::InvalidKey)?)
-                .read_to_end(&mut bytes)
-                .map_err(|_| SecretError::KeyFile)?;
-            keys.insert(id.clone(), SecretBytes(bytes));
-        }
+        let keys = paths
+            .iter()
+            .map(|(id, path)| Ok((id.clone(), key_file(path)?)))
+            .collect::<Result<_, SecretError>>()?;
         Self::new(active, keys)
     }
 

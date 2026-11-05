@@ -1,6 +1,6 @@
 use super::*;
 use llmproxy::{
-    limit::shared::LeaseGuard,
+    limit::shared::{LeaseGuard, RENEW_EVERY},
     storage::{FencedLease, OwnerId},
 };
 
@@ -66,7 +66,7 @@ async fn database_rejected_renewal_retries_and_rejected_release_leaves_row_to_ex
     let initial = expires_at().await;
     let guard = LeaseGuard::start(storage.clone(), key.clone(), lease, started);
     // When the first renewal is rejected.
-    tokio::time::sleep_until(started + Duration::from_secs(11)).await;
+    tokio::time::sleep_until(started + RENEW_EVERY + Duration::from_secs(1)).await;
     assert_eq!(
         expires_at().await,
         initial,
