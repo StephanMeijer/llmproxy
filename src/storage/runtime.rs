@@ -71,6 +71,7 @@ impl Storage {
             namespace: self.namespace.clone(),
             metrics: Arc::clone(&self.metrics),
             locked: None,
+            mixed: false,
         })
     }
 
@@ -89,15 +90,29 @@ pub struct StorageTransaction {
     /// The limit definition row this transaction already holds `FOR UPDATE`; row locks last until
     /// commit or rollback, so locking it again would only cost a round trip.
     pub(super) locked: Option<super::LimitKey>,
+    /// Set once a second limit was locked, so commit cannot name a single key.
+    pub(super) mixed: bool,
 }
 
 impl StorageTransaction {
-    /// Commits changes and delivers a payload-free wakeup hint after commit.
+    /// Commits changes and delivers a wakeup hint after commit, scoped to the one limit it locked.
+    /// An empty payload wakes every waiter; payloads never carry state.
     /// # Errors
     /// Returns a sanitized database failure. The caller must reread after ambiguity.
     pub async fn commit(mut self) -> Result<(), StorageError> {
+        let topic = match &self.locked {
+            Some(key) if !self.mixed => super::listener::limit_topic(&self.namespace, key),
+            _ => String::new(),
+        };
+        // pg_notify rejects payloads of 8000 bytes or more; an empty one wakes everyone instead.
+        let topic = if topic.len() < 8000 {
+            topic
+        } else {
+            String::new()
+        };
         let result = async {
-            sqlx::query("SELECT pg_notify('llmproxy_storage', '')")
+            sqlx::query("SELECT pg_notify('llmproxy_storage', $1)")
+                .bind(topic)
                 .execute(&mut *self.tx)
                 .await?;
             self.tx.commit().await.map_err(Into::into)

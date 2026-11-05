@@ -185,7 +185,7 @@ impl AdmissionStore for SharedRateStore {
                 max_wait.saturating_sub(enqueue_started.elapsed()),
             )
             .await?;
-            let mut listener = ChangeListener::new(self.storage.clone());
+            let mut listener = ChangeListener::for_limit(self.storage.clone(), &queued.key);
             loop {
                 let started = Instant::now();
                 let mut tx = self.storage.begin().await?;
