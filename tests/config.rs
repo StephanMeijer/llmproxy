@@ -133,6 +133,19 @@ fn empty_token_is_rejected() {
 }
 
 #[test]
+fn durations_too_large_for_a_clock_are_rejected() {
+    // Every request adds max_wait to Instant::now(); an unrepresentable sum would panic per request.
+    for field in ["max_wait", "connect_timeout"] {
+        let message = refused(&format!("{field} = \"18446744073709551615s\"\n"));
+        assert!(message.contains(field), "{message}");
+        assert!(message.contains("representable"), "{message}");
+    }
+    // Zero still means "never hold a request".
+    let config = Config::parse(&format!("{MINIMAL}max_wait = \"0s\"\n"), lookup).unwrap();
+    assert_eq!(config.max_wait, Duration::ZERO);
+}
+
+#[test]
 fn unknown_keys_bad_durations_and_bad_toml_are_rejected() {
     let typo = format!("{MINIMAL}max_wiat = \"1s\"\n");
     assert!(Config::parse(&typo, lookup).is_err());
