@@ -133,27 +133,20 @@ pub async fn check_schema(pool: &PgPool) -> Result<(), StorageError> {
         .acquire()
         .await
         .map_err(|_| StorageError::Unavailable)?;
-    check_connection_schema(&mut connection, None).await
+    check_connection_schema(&mut connection).await
 }
 
-/// Checks the server and applied migrations in one round trip, optionally setting this
-/// transaction's statement and lock timeouts (in milliseconds) in the same statement.
+/// Checks the server and applied migrations in one round trip.
 /// A missing `_sqlx_migrations` table fails the whole statement with `42P01`: `IncompatibleSchema`.
-async fn check_connection_schema(
-    connection: &mut PgConnection,
-    timeout: Option<&str>,
-) -> Result<(), StorageError> {
+async fn check_connection_schema(connection: &mut PgConnection) -> Result<(), StorageError> {
     let (version, versions, successes, checksums): (i32, Vec<i64>, Vec<bool>, Vec<Vec<u8>>) =
         sqlx::query_as(
             "SELECT current_setting('server_version_num')::integer, \
              coalesce(array_agg(version ORDER BY version), '{}'), \
              coalesce(array_agg(success ORDER BY version), '{}'), \
-             coalesce(array_agg(checksum ORDER BY version), '{}'), \
-             set_config('statement_timeout', coalesce($1, current_setting('statement_timeout')), true), \
-             set_config('lock_timeout', coalesce($1, current_setting('lock_timeout')), true) \
+             coalesce(array_agg(checksum ORDER BY version), '{}') \
              FROM _sqlx_migrations",
         )
-        .bind(timeout)
         .fetch_one(&mut *connection)
         .await?;
     if version < MIN_POSTGRES_VERSION {
