@@ -61,16 +61,29 @@ async fn credential_stdin_accepts_crlf_and_rejects_oversized_input() {
 async fn fingerprint_file_requires_exact_key_length() {
     let op = Operator::new().await;
     let alice = op.person("Alice");
-    for length in [0, 31, 33] {
-        fs::write(&op.fingerprint, vec![1; length]).unwrap();
+    // Missing file first: the later writes recreate it for `close`.
+    let cases = [
+        (None, "fingerprint key unavailable"),
+        (Some(0), "fingerprint key must contain exactly 32 bytes"),
+        (Some(31), "fingerprint key must contain exactly 32 bytes"),
+        (Some(33), "fingerprint key must contain exactly 32 bytes"),
+    ];
+    for (length, message) in cases {
+        match length {
+            Some(length) => fs::write(&op.fingerprint, vec![1; length]).unwrap(),
+            None => fs::remove_file(&op.fingerprint).unwrap(),
+        }
         let output = op.run(
             &["auth", "claude", "set", &alice, "--credential-stdin"],
             Some(ALICE_KEY),
         );
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{stderr}");
         assert!(
-            !String::from_utf8_lossy(&output.stderr).contains(op.fingerprint.to_str().unwrap())
+            !stderr.contains(op.fingerprint.to_str().unwrap()),
+            "{stderr}"
         );
     }
     assert_eq!(
