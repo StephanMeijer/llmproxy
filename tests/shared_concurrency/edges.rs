@@ -35,17 +35,12 @@ async fn lease_cancellation_runs_live_work_and_rejects_expired_work() {
 }
 
 #[tokio::test]
-async fn repository_rejects_invalid_capacity_generation_and_definition_identity() {
+async fn repository_rejects_invalid_capacity_and_definition_identity() {
     let (db, storage, key) = setup().await;
     let mut tx = storage.begin().await.unwrap();
-    let mut lease = FencedLease::new(OwnerId(Uuid::new_v4()));
+    let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     assert_eq!(
         tx.acquire_concurrency(&key, &lease, 0).await,
-        Err(StorageError::InvalidData)
-    );
-    lease.generation = 0;
-    assert_eq!(
-        tx.acquire_concurrency(&key, &lease, 1).await,
         Err(StorageError::InvalidData)
     );
     let other_key = LimitKey {

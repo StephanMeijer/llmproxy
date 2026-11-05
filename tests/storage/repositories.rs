@@ -121,7 +121,6 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     let fenced = FencedLease {
         id: lease.id,
         owner: lease.owner,
-        generation: 1,
     };
     assert!(tx.acquire_concurrency(&key, &fenced, 1).await.unwrap());
     tx.commit().await.unwrap();
@@ -163,7 +162,6 @@ async fn expired_leases_cannot_revive_and_reclaim_uses_database_time() {
     let fenced = FencedLease {
         id: lease.id,
         owner: lease.owner,
-        generation: 1,
     };
     assert!(tx.acquire_concurrency(&key, &fenced, 1).await.unwrap());
     tx.commit().await.unwrap();
