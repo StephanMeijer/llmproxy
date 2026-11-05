@@ -27,7 +27,7 @@ async fn two_process_stream_lifecycle() {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(RENEW_EVERY + Duration::from_secs(5), async {
         loop {
             let renewed: bool = sqlx::query_scalar(
                 "SELECT extract(epoch FROM expires_at)::float8>$1 FROM concurrency_leases",

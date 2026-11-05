@@ -17,7 +17,7 @@ mod scenarios;
 
 use llmproxy::{
     config::Config,
-    limit::shared::{CompiledLimits, SharedDefinition},
+    limit::shared::{CompiledLimits, RENEW_EVERY, SharedDefinition},
     storage::{self, LEASE_LIFETIME, LimitKey, PersonId, Storage},
 };
 use std::time::Duration;
