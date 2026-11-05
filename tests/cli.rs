@@ -262,6 +262,11 @@ fn rust_log_selects_the_log_level() {
         request_line(&default),
         "info is the default level: {default}"
     );
+    let empty = request_log("log-empty", Some(""));
+    assert!(
+        request_line(&empty),
+        "an empty RUST_LOG falls back to info: {empty}"
+    );
     let quiet = request_log("log-warn", Some("warn"));
     assert!(
         !request_line(&quiet),
