@@ -4,7 +4,7 @@ use sqlx::{
     ConnectOptions, PgPool, Postgres, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc};
 
 /// Lazy namespace-scoped database runtime. Construction never contacts `PostgreSQL`.
 #[derive(Clone)]
@@ -12,7 +12,6 @@ pub struct Storage {
     metrics: Arc<CredentialMetrics>,
     pub(super) pool: PgPool,
     pub(super) namespace: String,
-    pub(super) timeout: Duration,
     pub(super) notifications: Arc<super::listener::Notifications>,
 }
 
@@ -35,7 +34,11 @@ impl Storage {
             .min_connections(0)
             .max_connections(config.max_connections)
             .acquire_timeout(config.acquire_timeout.min(config.connect_timeout))
-            .connect_lazy_with(options.clone());
+            // Session settings bound every statement, including the schema check `begin()` runs first.
+            .connect_lazy_with(options.clone().options([
+                ("statement_timeout", config.acquire_timeout.as_millis()),
+                ("lock_timeout", config.acquire_timeout.as_millis()),
+            ]));
         Ok(Self {
             notifications: Arc::new(super::listener::Notifications::new(
                 options,
@@ -44,7 +47,6 @@ impl Storage {
             metrics: Arc::default(),
             pool,
             namespace: config.namespace.clone(),
-            timeout: config.acquire_timeout,
         })
     }
 
@@ -63,9 +65,6 @@ impl Storage {
 
     async fn open(&self) -> Result<StorageTransaction, StorageError> {
         let mut tx = self.pool.begin().await?;
-        let milliseconds = self.timeout.as_millis().to_string();
-        sqlx::query("SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $1, true)")
-            .bind(milliseconds).execute(&mut *tx).await?;
         check_connection_schema(&mut tx).await?;
         Ok(StorageTransaction {
             tx,
