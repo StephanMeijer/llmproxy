@@ -48,7 +48,8 @@ async fn terminal_prompt_hides_credential_input() {
         .args([
             "-qefc",
             // `tty` first: the transcript's first line names the pseudo-terminal to watch.
-            &format!("tty; exec '{BIN}' auth claude set {alice}"),
+            // printf supplies the newline: uutils tty (Ubuntu 26.04) prints none.
+            &format!("printf '%s\\n' \"$(tty)\"; exec '{BIN}' auth claude set {alice}"),
             "/dev/null",
         ])
         .env("LLMPROXY_CONFIG", &op.db.path)
