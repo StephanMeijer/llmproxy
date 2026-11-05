@@ -24,7 +24,12 @@ impl Replica {
         let text = fs::read_to_string(config).unwrap();
         let parsed: toml::Value = toml::from_str(&text).unwrap();
         let address = parsed.get("listen").unwrap().as_str().unwrap();
-        let log = fs::File::create(config.with_extension("log")).unwrap();
+        // Append so a restarted replica keeps the earlier run's output for the leak scan.
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(config.with_extension("log"))
+            .unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
             .arg(config)
             .stdout(log.try_clone().unwrap())
