@@ -260,24 +260,32 @@ async fn real_binary_retries_a_failed_count_refresh_without_a_new_change() {
         .await
         .unwrap();
     let waiting = "SELECT query_start::text FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT person_id,state,%'";
-    let started: String = loop {
-        if let Some(started) = sqlx::query_scalar(waiting)
-            .fetch_optional(&f.db.pool)
+    let started: String = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(started) = sqlx::query_scalar(waiting)
+                .fetch_optional(&f.db.pool)
+                .await
+                .unwrap()
+            {
+                break started;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("count scan waits on the credential table lock");
+    tokio::time::timeout(WAIT, async {
+        while sqlx::query_scalar::<_, String>(waiting)
+            .fetch_all(&f.db.pool)
             .await
             .unwrap()
+            .contains(&started)
         {
-            break started;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    while sqlx::query_scalar::<_, String>(waiting)
-        .fetch_all(&f.db.pool)
-        .await
-        .unwrap()
-        .contains(&started)
-    {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    })
+    .await
+    .expect("count scan gives up its lock wait after the lock timeout");
     tx.commit().await.unwrap();
     // Then a retry, not a notification, reports the committed change.
     counts(
