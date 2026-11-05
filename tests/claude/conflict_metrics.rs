@@ -15,7 +15,7 @@ const SAMPLE: &str = "llm3_shared_limit_conflicts_total{provider=\"anthropic\"}"
 const QUEUE_RESPONSE_LIMIT: Duration = Duration::from_secs(17);
 
 async fn conflicts(f: &Fixture, binary: &Binary, phase: &str, expected: u64) {
-    let text = scrape(f, binary, phase).await;
+    let text = scrape(f, binary, phase, None).await;
     let samples: Vec<_> = text
         .lines()
         .filter(|line| line.starts_with("llm3_shared_limit_conflicts_total{"))
@@ -70,7 +70,7 @@ async fn divergent_replica_conflicts_increment_only_its_bounded_counter() {
     .fetch_all(&f.db.pool)
     .await
     .unwrap();
-    let text = scrape(&f, &divergent, "conflict-redaction").await;
+    let text = scrape(&f, &divergent, "conflict-redaction", None).await;
     for fingerprint in fingerprints {
         assert!(!text.contains(&fingerprint));
     }

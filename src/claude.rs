@@ -14,17 +14,20 @@ use crate::{
     secret::{self, KeyRing},
     storage::{CredentialVersion, Credentials, Storage, StorageError},
 };
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::mpsc;
 
 pub(super) const MESSAGES_PATH: &str = "/claude/v1/messages";
+const COUNTS_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(super) struct Claude {
     route: Route,
     definitions: Vec<SharedDefinition>,
     storage: Storage,
     encryption: CredentialEncryptionConfig,
-    runtime: OnceLock<(Credentials, SharedRateStore)>,
-    refresh: tokio::sync::Mutex<()>,
+    runtime: OnceLock<(Arc<Credentials>, SharedRateStore)>,
+    /// Wakes the single background task that owns credential count refreshes.
+    counts: OnceLock<mpsc::Sender<()>>,
 }
 
 impl Claude {
@@ -60,7 +63,7 @@ impl Claude {
                 storage,
                 encryption: encryption.clone(),
                 runtime: OnceLock::new(),
-                refresh: tokio::sync::Mutex::new(()),
+                counts: OnceLock::new(),
             }),
             compiled.local,
         ))
@@ -68,12 +71,25 @@ impl Claude {
 
     /// Key files are read on first use and retried on every request until they load,
     /// so a mount that is late or briefly unreadable does not require a restart.
-    fn runtime(&self, max_wait: std::time::Duration) -> Option<&(Credentials, SharedRateStore)> {
+    fn runtime(
+        &self,
+        max_wait: std::time::Duration,
+    ) -> Option<&(Arc<Credentials>, SharedRateStore)> {
         if let Some(runtime) = self.runtime.get() {
             return Some(runtime);
         }
-        let loaded = self.load_runtime(max_wait)?;
-        Some(self.runtime.get_or_init(|| loaded))
+        let (credentials, store) = self.load_runtime(max_wait)?;
+        Some(self.runtime.get_or_init(|| {
+            let credentials = Arc::new(credentials);
+            self.counts.get_or_init(|| {
+                spawn_counts(
+                    Arc::clone(&credentials),
+                    Arc::clone(self.storage.metrics()),
+                    self.storage.credential_changes(),
+                )
+            });
+            (credentials, store)
+        }))
     }
 
     fn load_runtime(
@@ -105,9 +121,7 @@ impl Claude {
         let Some((credentials, store)) = self.runtime(proxy.max_wait) else {
             return unavailable();
         };
-        let snapshot = credentials.snapshot(*person).await;
-        self.refresh_counts(credentials, metrics).await;
-        let Ok(snapshot) = snapshot else {
+        let Ok(snapshot) = credentials.snapshot(*person).await else {
             return unavailable();
         };
         let Ok(mut key) = HeaderValue::from_bytes(snapshot.secret.expose()) else {
@@ -140,7 +154,7 @@ impl Claude {
             Ok(admission) => admission,
             Err(SharedAdmissionError::QueueTimeout(_)) => return queue_timeout(proxy.max_wait),
             Err(SharedAdmissionError::Storage(storage_error)) => {
-                self.refresh_counts(credentials, metrics).await;
+                self.refresh_counts();
                 return admission_unavailable(storage_error, metrics);
             }
         };
@@ -174,7 +188,7 @@ impl Claude {
             let result = cancellation
                 .run(invalidate(credentials, snapshot.version, metrics))
                 .await;
-            self.refresh_counts(credentials, metrics).await;
+            self.refresh_counts();
             if result.is_err() {
                 return unavailable();
             }
@@ -189,12 +203,41 @@ impl Claude {
         )
     }
 
-    async fn refresh_counts(&self, credentials: &Credentials, metrics: &CredentialMetrics) {
-        let _refresh = self.refresh.lock().await;
-        if let Ok(counts) = credentials.counts().await {
-            metrics.set_credentials(CredentialProvider::Anthropic, counts);
+    /// Queues at most one refresh behind the one in flight; extra requests coalesce.
+    fn refresh_counts(&self) {
+        if let Some(wake) = self.counts.get() {
+            // A full channel already holds a pending refresh.
+            let _ = wake.try_send(());
         }
     }
+}
+
+/// Refreshes credential counts once now, then on every credential change or request,
+/// retrying a failed scan every `COUNTS_RETRY` until one succeeds.
+/// Ends when the adapter (the only sender) is dropped or storage closes the listener.
+fn spawn_counts(
+    credentials: Arc<Credentials>,
+    metrics: Arc<CredentialMetrics>,
+    mut changes: tokio::sync::watch::Receiver<()>,
+) -> mpsc::Sender<()> {
+    let (wake, mut woken) = mpsc::channel(1);
+    tokio::spawn(async move {
+        loop {
+            changes.borrow_and_update();
+            let scan = credentials.counts().await;
+            let failed = scan.is_err();
+            if let Ok(counts) = scan {
+                metrics.set_credentials(CredentialProvider::Anthropic, counts);
+            }
+            tokio::select! {
+                result = changes.changed() => if result.is_err() { break },
+                request = woken.recv() => if request.is_none() { break },
+                // A failed scan retries on its own; the next change may never come.
+                () = tokio::time::sleep(COUNTS_RETRY), if failed => {},
+            }
+        }
+    });
+    wake
 }
 
 fn request_model(body: &[u8]) -> Option<String> {
