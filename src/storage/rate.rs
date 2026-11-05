@@ -12,7 +12,7 @@ impl StorageTransaction {
         key: &LimitKey,
         charge: SharedCharge<'_>,
     ) -> Result<Option<Vec<RateState>>, StorageError> {
-        let snapshot = self.lock_limit(key).await?;
+        let rates = self.lock_rates(key).await?;
         let (requests, tokens) = charge
             .definition
             .buckets()
@@ -23,7 +23,7 @@ impl StorageTransaction {
             (RateKind::Tokens, tokens, charge.tokens),
         ] {
             if let Some(mut bucket) = bucket {
-                if let Some(state) = snapshot.rates.iter().find(|state| state.kind == kind) {
+                if let Some(state) = rates.iter().find(|state| state.kind == kind) {
                     bucket
                         .restore(state.available_units)
                         .map_err(|_| StorageError::InvalidData)?;

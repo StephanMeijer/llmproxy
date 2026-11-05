@@ -179,8 +179,8 @@ impl AdmissionStore for SharedRateStore {
                 } else {
                     tx.rollback().await?;
                 }
-                match listener.limit(&queued.key, POLL_INTERVAL).await {
-                    Ok(_) => {}
+                match listener.changed(POLL_INTERVAL).await {
+                    Ok(()) => {}
                     Err(StorageError::Unavailable) => tokio::time::sleep(POLL_INTERVAL).await,
                     Err(error) => return Err(error.into()),
                 }
