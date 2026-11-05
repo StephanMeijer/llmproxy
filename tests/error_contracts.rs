@@ -26,6 +26,7 @@ fn public_failures_have_distinct_bounded_diagnostics_without_inner_errors() {
         Box::new(StorageError::Conflict),
         Box::new(StorageError::InvalidData),
         Box::new(StorageError::NotFound),
+        Box::new(StorageError::Encryption),
         Box::new(AccountingError::ZeroRate),
         Box::new(AccountingError::InvalidBalance),
         Box::new(AccountingError::InsufficientBudget),

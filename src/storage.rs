@@ -40,6 +40,8 @@ pub enum StorageError {
     Conflict,
     InvalidData,
     NotFound,
+    /// A key file is missing or wrong, or an envelope does not authenticate; the database is fine.
+    Encryption,
 }
 
 impl StorageError {
@@ -70,6 +72,9 @@ impl fmt::Display for StorageError {
             Self::Conflict => "database mutation conflicts with current state",
             Self::InvalidData => "invalid database record",
             Self::NotFound => "database record not found",
+            Self::Encryption => {
+                "credential encryption failed; check the credential_encryption key files and key IDs"
+            }
         })
     }
 }

@@ -27,7 +27,7 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
             .reencrypt_credentials(&config, "new")
             .await
             .unwrap_err(),
-        StorageError::Unavailable
+        StorageError::Encryption
     );
     fs::write(&old, [7; 32]).unwrap();
     config.keys.insert("old".into(), old.clone());
@@ -36,7 +36,7 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
             .reencrypt_credentials(&config, "new")
             .await
             .unwrap_err(),
-        StorageError::Unavailable
+        StorageError::Encryption
     );
     let after: (i64, Vec<u8>, Vec<u8>) =
         sqlx::query_as("SELECT generation,ciphertext,fingerprint FROM provider_credentials")

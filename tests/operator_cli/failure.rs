@@ -46,6 +46,9 @@ async fn operator_rejects_disabled_missing_invalid_and_unavailable_inputs() {
     fs::write(&op.old, [8; 32]).unwrap();
     let wrong_key = op.run(&["auth", "credentials", "reencrypt", "--to", "new"], None);
     assert_eq!(wrong_key.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&wrong_key.stderr);
+    assert!(stderr.contains("credential encryption failed"), "{stderr}");
+    assert!(!stderr.contains("PostgreSQL unavailable"), "{stderr}");
     transcript.extend(wrong_key.stderr);
     op.ok(&["auth", "person", "disable", &alice], None);
     for (args, input) in [
