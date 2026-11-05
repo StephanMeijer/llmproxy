@@ -26,7 +26,7 @@ use tokio::{
 };
 
 use crate::{
-    auth::{AuthError, Authenticator, RouteKind},
+    auth::{AuthError, Authenticator, MAX_VERIFY_WAIT, RouteKind},
     config::{Config, ConfigError},
     limit::Limits,
     metrics::CredentialMetrics,
@@ -382,7 +382,7 @@ impl Proxy {
             ..Metrics::default()
         };
         let (claude, limits) = claude::Claude::configure(&config, storage.clone())?;
-        let auth = Authenticator::new(config.proxy_token, storage);
+        let auth = Authenticator::new(config.proxy_token, storage, config.max_wait);
         Ok(Self {
             auth,
             claude,
@@ -419,17 +419,7 @@ impl Proxy {
                 parts.extensions.insert(principal);
             }
             Ok(None) => {}
-            Err(failure) => {
-                let kind = match failure {
-                    AuthError::Unauthorized => "unauthorized",
-                    AuthError::Forbidden => "forbidden",
-                    AuthError::Unavailable => "authentication_unavailable",
-                };
-                return (
-                    LABEL_OTHER,
-                    error(failure.status(), kind, "proxy authentication failed"),
-                );
-            }
+            Err(failure) => return (LABEL_OTHER, auth_failure(failure, self.max_wait)),
         }
         if kind == RouteKind::Claude {
             if parts.uri.path() != claude::MESSAGES_PATH || parts.method != Method::POST {
@@ -686,6 +676,17 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     Some(Duration::from_secs(seconds))
 }
 
+/// A busy verifier is a retryable queue timeout, not an outage.
+fn auth_failure(failure: AuthError, max_wait: Duration) -> Response {
+    let kind = match failure {
+        AuthError::Unauthorized => "unauthorized",
+        AuthError::Forbidden => "forbidden",
+        AuthError::Unavailable => "authentication_unavailable",
+        AuthError::Busy => return queue_timeout(max_wait.min(MAX_VERIFY_WAIT)),
+    };
+    error(failure.status(), kind, "proxy authentication failed")
+}
+
 fn queue_timeout(max_wait: Duration) -> Response {
     let mut response = error(
         StatusCode::TOO_MANY_REQUESTS,
@@ -775,4 +776,30 @@ pub fn metrics_router(proxy: Arc<Proxy>) -> Router {
             get(|State(proxy): State<Arc<Proxy>>| async move { proxy.metrics.render() }),
         )
         .with_state(proxy)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "unit test assertions"
+)]
+mod tests {
+    use super::{AuthError, Duration, StatusCode, auth_failure, header, to_bytes};
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn a_busy_verifier_is_a_retryable_queue_timeout_not_an_outage() {
+        // Given a max_wait longer than the verifier wait.
+        // When every verifier stayed busy.
+        let response = auth_failure(AuthError::Busy, Duration::from_mins(1));
+        // Then the caller gets a 429 queue_timeout that retries after the verifier wait.
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), AuthError::Busy.status());
+        assert_eq!(response.headers()[header::RETRY_AFTER], "10");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"]["type"], "queue_timeout");
+    }
 }
