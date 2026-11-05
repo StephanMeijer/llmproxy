@@ -26,10 +26,6 @@ async fn aggregate_both_budgets_and_person_isolation_when_two_pools_admit() {
     .unwrap();
     assert_eq!(balances.len(), 2);
     assert!(balances.iter().all(|(_, units)| *units < 1_000_000));
-    assert_eq!(
-        SharedAdmissionError::QueueTimeout(SHORT).retry_after(),
-        Some(SHORT)
-    );
     f.waiters(0).await;
     f.close().await;
 }

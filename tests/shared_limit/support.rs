@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 #[derive(Default)]
 pub struct State {
-    pub definitions: HashMap<(String, String), [u8; 32]>,
+    pub definitions: HashMap<(String, String), serde_json::Value>,
     pub charged: HashMap<(Uuid, String), usize>,
     pub leases: usize,
     pub order: Vec<String>,
@@ -33,10 +33,12 @@ impl AdmissionStore for Replica {
         if self.fail.as_deref() == Some(d.name()) {
             return Err(());
         }
+        let value = serde_json::to_value(d).unwrap();
         match state.definitions.get(&key) {
-            Some(hash) => d.verify(hash).map_err(|_| ())?,
+            Some(stored) if *stored != value => return Err(()),
+            Some(_) => {}
             None => {
-                state.definitions.insert(key, d.fingerprint().unwrap());
+                state.definitions.insert(key, value);
             }
         }
         *state

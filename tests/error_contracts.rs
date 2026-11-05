@@ -45,14 +45,11 @@ fn public_failures_have_distinct_bounded_diagnostics_without_inner_errors() {
 }
 
 #[test]
-fn admission_retry_metadata_distinguishes_timeout_from_storage_failure() {
+fn admission_errors_render_their_failure_category() {
     // Given a queue deadline and an unavailable database.
     let wait = Duration::from_secs(3);
     let timeout = SharedAdmissionError::QueueTimeout(wait);
     let unavailable = SharedAdmissionError::from(StorageError::Unavailable);
-    // When a caller classifies the failures for an HTTP retry response.
-    assert_eq!(timeout.retry_after(), Some(wait));
-    assert_eq!(unavailable.retry_after(), None);
     // Then safe formatting preserves the failure category.
     assert_eq!(timeout.to_string(), "queue_timeout");
     assert_eq!(

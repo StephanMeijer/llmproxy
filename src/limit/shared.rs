@@ -12,8 +12,6 @@ pub use concurrency::{
 };
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 use super::Limits;
 use crate::config::{ConfigError, LimitConfig};
@@ -40,31 +38,6 @@ pub struct SharedDefinition {
 }
 
 impl SharedDefinition {
-    /// Stable, complete configuration bytes for storage and comparison.
-    /// # Errors
-    /// Returns a configuration error if serialization fails.
-    pub fn canonical(&self) -> Result<Vec<u8>, ConfigError> {
-        serde_json::to_vec(self)
-            .map_err(|_| ConfigError("shared limit serialization failed".into()))
-    }
-
-    /// SHA-256 of the versioned canonical behavior payload.
-    /// # Errors
-    /// Returns a configuration error if serialization fails.
-    pub fn fingerprint(&self) -> Result<[u8; 32], ConfigError> {
-        Ok(Sha256::digest(self.canonical()?).into())
-    }
-
-    /// Reject a conflicting replica before shared admission.
-    /// # Errors
-    /// Returns a configuration conflict if the persisted fingerprint differs.
-    pub fn verify(&self, persisted: &[u8]) -> Result<(), ConfigError> {
-        if self.fingerprint()?.as_slice() != persisted {
-            return Err(ConfigError("shared limit configuration conflict".into()));
-        }
-        Ok(())
-    }
-
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -78,17 +51,6 @@ impl SharedDefinition {
     #[must_use]
     pub const fn max_inflight(&self) -> Option<usize> {
         self.max_inflight
-    }
-
-    /// A budget identity deliberately excludes credential generation.
-    #[must_use]
-    pub fn key(&self, person: Uuid) -> SharedKey<'_> {
-        SharedKey {
-            namespace: &self.namespace,
-            person,
-            provider: self.provider,
-            name: &self.name,
-        }
     }
 
     #[must_use]
@@ -111,15 +73,6 @@ impl SharedDefinition {
                 .transpose()?,
         ))
     }
-}
-
-/// Namespace and person partition all durable budgets; provider/name identify the pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SharedKey<'a> {
-    pub namespace: &'a str,
-    pub person: Uuid,
-    pub provider: &'a str,
-    pub name: &'a str,
 }
 
 /// Local pools retain their static-path behavior; only Claude paths select shared definitions.

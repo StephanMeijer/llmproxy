@@ -1,10 +1,39 @@
 use super::*;
 use futures_util::StreamExt;
 use llmproxy::{
-    limit::shared::{LeaseGuard, LeaseStreamError},
+    limit::shared::{
+        Admission, AdmissionStore, LeaseGuard, LeaseStreamError, PendingAdmission, SharedCharge,
+        SharedRequest,
+    },
     storage::{FencedLease, OwnerId},
 };
+use std::sync::Mutex;
 use tokio::time::Instant;
+
+/// Hands out one pre-started guard so tests reach `Admission::stream` with a chosen start time.
+struct Prestarted(Mutex<Option<LeaseGuard>>);
+
+impl AdmissionStore for Prestarted {
+    type Lease = Option<LeaseGuard>;
+    type Error = ();
+    async fn acquire(&self, _: SharedCharge<'_>) -> Result<Self::Lease, ()> {
+        Ok(self.0.lock().unwrap().take())
+    }
+}
+
+async fn admission(guard: LeaseGuard) -> Admission<Option<LeaseGuard>> {
+    let definitions = [definition()];
+    let request = SharedRequest {
+        person: Uuid::new_v4(),
+        path: "/claude/v1/messages",
+        model: None,
+        body_bytes: 0,
+    };
+    PendingAdmission::new(&definitions, request)
+        .acquire(&Prestarted(Mutex::new(Some(guard))))
+        .await
+        .unwrap()
+}
 
 #[tokio::test]
 async fn concurrent_transactions_never_exceed_capacity() {
@@ -109,7 +138,7 @@ async fn completed_upstream_retains_lease_until_buffered_body_is_consumed() {
         produced.send(()).unwrap();
         Ok::<_, std::io::Error>("last bytes")
     });
-    let mut stream = Box::pin(guard.stream(source));
+    let mut stream = Box::pin(admission(guard).await.stream(source));
     // When the source produces its last bytes before downstream polling.
     tokio::time::timeout(BOUND, observed)
         .await
@@ -136,9 +165,11 @@ async fn old_confirmation_cancels_unpolled_upstream_and_discards_buffered_data()
     let guard = LeaseGuard::start(storage.clone(), (key, lease), started);
     let mut cancellation = guard.cancellation();
     // When the downstream has not yet polled the response stream.
-    let stream = guard.stream(futures_util::stream::repeat_with(|| {
-        Ok::<_, std::io::Error>("chunk")
-    }));
+    let stream = admission(guard)
+        .await
+        .stream(futures_util::stream::repeat_with(|| {
+            Ok::<_, std::io::Error>("chunk")
+        }));
     tokio::time::timeout(BOUND, cancellation.cancelled())
         .await
         .unwrap();
