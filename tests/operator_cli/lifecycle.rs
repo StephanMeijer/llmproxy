@@ -90,7 +90,7 @@ async fn operator_lifecycle_keeps_secrets_out_of_status_and_storage() {
     encrypted_rows(&op, "encrypted-rows.json", wire).await;
     artifact(
         "lifecycle-output.json",
-        &serde_json::to_vec_pretty(&transcript).unwrap(),
+        serde_json::to_vec_pretty(&transcript).unwrap(),
     );
     artifact("lifecycle.txt", b"PASS real binary migrate/create/issue/set/status/replace/remove/revoke/reencrypt; full token occurs once and verifies Argon2id; no token in status; no fake provider key in stdout/stderr/database rows; duplicate credential rejected\n");
     op.close().await;
@@ -107,5 +107,5 @@ async fn encrypted_rows(op: &Operator, artifact_name: &str, wire: &str) {
             assert!(!row.contains(key));
         }
     }
-    artifact(artifact_name, &serde_json::to_vec_pretty(&rows).unwrap());
+    artifact(artifact_name, serde_json::to_vec_pretty(&rows).unwrap());
 }

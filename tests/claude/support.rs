@@ -1,4 +1,6 @@
 use super::database;
+#[path = "../common/evidence.rs"]
+mod evidence;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
 use axum::{
@@ -7,6 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Response,
 };
+pub use evidence::artifact;
 use llmproxy::{
     secret::{KeyRing, ProxyToken, SecretBytes, TokenHasher},
     storage::{self, CredentialVersion, Credentials, PersonId, Storage, TokenId},
@@ -269,12 +272,6 @@ pub fn reply(hit: Hit, status: StatusCode, body: &'static str) {
         .headers_mut()
         .insert("request-id", "provider-request".parse().unwrap());
     assert!(hit.reply.send(response).is_ok());
-}
-
-pub fn artifact(name: &str, value: &str) {
-    if let Ok(dir) = std::env::var("LLMPROXY_CLAUDE_EVIDENCE") {
-        fs::write(PathBuf::from(dir).join(name), value).unwrap();
-    }
 }
 
 pub struct Dropped(pub Arc<tokio::sync::Notify>);

@@ -164,16 +164,10 @@ impl Fixture {
         let balances: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('kind',kind,'available_units',available_units) FROM rate_state ORDER BY kind")
             .fetch_all(&self.db.pool).await.unwrap();
         let artifact = json!({"scenario":self.scenario,"provider_hit_order":self.order,"provider_hit_count":self.order.len(),"observed":observed,"credentials":credentials,"waiters":waiters,"leases":leases,"rate_balances":balances,"plaintext_scan_passed":true});
-        let directory = std::env::var_os("LLMPROXY_INTEGRATION_EVIDENCE").map_or_else(
-            || PathBuf::from(".omo/evidence/postgres-integration"),
-            PathBuf::from,
-        );
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(
-            directory.join(format!("{}.json", self.scenario)),
+        super::evidence::artifact(
+            &format!("{}.json", self.scenario),
             serde_json::to_vec_pretty(&artifact).unwrap(),
-        )
-        .unwrap();
+        );
     }
 
     /// Stops the replicas, then fails the test if any process log contains a secret.

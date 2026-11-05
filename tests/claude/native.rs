@@ -227,7 +227,7 @@ async fn curl_no_buffer_observes_sse_before_provider_completion() {
     assert!(result.1.success());
     artifact(
         "curl-sse.txt",
-        &format!(
+        format!(
             "invocation: curl --silent --show-error --no-buffer --config - --data-binary <native body> <replica>/claude/v1/messages\nPASS first chunk received while provider open; curl exit 0\n{}{}",
             String::from_utf8_lossy(FIRST),
             String::from_utf8_lossy(LAST)
