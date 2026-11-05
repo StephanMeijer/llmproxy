@@ -185,26 +185,46 @@ impl Config {
     ///
     /// # Errors
     /// Returns a [`ConfigError`] for invalid TOML, unknown keys, an unresolved or unterminated
-    /// `${VAR}`, an empty `proxy_token`, or invalid optional adapter/storage settings.
+    /// `${VAR}`, an empty `proxy_token`, a duration too large to add to the clock, or invalid
+    /// optional adapter/storage settings.
     pub fn parse(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
-        let mut value: toml::Value =
-            toml::from_str(text).map_err(|_| ConfigError("parse config: invalid TOML".into()))?;
+        let mut value: toml::Value = toml::from_str(text).map_err(|e: toml::de::Error| {
+            let start = e.span().map_or(0, |span| span.start);
+            let line = text.bytes().take(start).filter(|&b| b == b'\n').count() + 1;
+            ConfigError(format!("parse config: invalid TOML at line {line}"))
+        })?;
         expand_value(&mut value, &lookup)?;
-        // Serde errors may contain string values, including database passwords.
-        let mut config: Self = value.try_into().map_err(|_| {
-            ConfigError(
-                "invalid config: check field names and types; durations require whole seconds like \"120s\""
-                    .into(),
-            )
+        // Serde errors may contain string values, including database passwords; only the
+        // unknown/missing field messages are built from identifiers alone.
+        let mut config: Self = value.try_into().map_err(|e: toml::de::Error| {
+            let message = e.to_string();
+            if message.starts_with("unknown field") || message.starts_with("missing field") {
+                ConfigError(format!("invalid config: {}", message.trim_end()))
+            } else {
+                ConfigError(
+                    "invalid config: check field names and types; durations require whole seconds like \"120s\""
+                        .into(),
+                )
+            }
         })?;
         if config.proxy_token.is_empty() {
             return Err(ConfigError("proxy_token must not be empty".into()));
         }
-        config.validate_adapters()?;
+        config.validate()?;
         Ok(config)
     }
 
-    pub(crate) fn validate_adapters(&mut self) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&mut self) -> Result<(), ConfigError> {
+        for (field, duration) in [
+            ("max_wait", self.max_wait),
+            ("connect_timeout", self.connect_timeout),
+        ] {
+            if !representable(duration) {
+                return Err(ConfigError(format!(
+                    "{field} must be a representable duration"
+                )));
+            }
+        }
         if let Some(postgres) = &self.postgres {
             postgres.validate()?;
         }
@@ -274,7 +294,7 @@ impl PostgresConfig {
             ("connect_timeout", self.connect_timeout),
             ("acquire_timeout", self.acquire_timeout),
         ] {
-            if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
+            if duration.is_zero() || !representable(duration) {
                 return Err(ConfigError(format!(
                     "postgres.{field} must be a positive, representable duration"
                 )));
@@ -311,6 +331,11 @@ impl CredentialEncryptionConfig {
         }
         Ok(())
     }
+}
+
+/// Whether `duration` can be added to the current instant without overflowing.
+fn representable(duration: Duration) -> bool {
+    Instant::now().checked_add(duration).is_some()
 }
 
 fn valid_identifier(value: &str) -> bool {

@@ -133,6 +133,19 @@ fn empty_token_is_rejected() {
 }
 
 #[test]
+fn durations_too_large_for_a_clock_are_rejected() {
+    // Every request adds max_wait to Instant::now(); an unrepresentable sum would panic per request.
+    for field in ["max_wait", "connect_timeout"] {
+        let message = refused(&format!("{field} = \"18446744073709551615s\"\n"));
+        assert!(message.contains(field), "{message}");
+        assert!(message.contains("representable"), "{message}");
+    }
+    // Zero still means "never hold a request".
+    let config = Config::parse(&format!("{MINIMAL}max_wait = \"0s\"\n"), lookup).unwrap();
+    assert_eq!(config.max_wait, Duration::ZERO);
+}
+
+#[test]
 fn unknown_keys_bad_durations_and_bad_toml_are_rejected() {
     let typo = format!("{MINIMAL}max_wiat = \"1s\"\n");
     assert!(Config::parse(&typo, lookup).is_err());
@@ -141,6 +154,21 @@ fn unknown_keys_bad_durations_and_bad_toml_are_rejected() {
     assert!(err.0.contains("whole seconds"), "{err}");
     let err = Config::parse("listen = ", lookup).unwrap_err();
     assert!(err.0.contains("parse config"), "{err}");
+}
+
+#[test]
+fn errors_name_the_bad_key_or_line_but_never_echo_values() {
+    let typo = format!("{MINIMAL}[[limit]]\nname = \"a\"\nmodel = \"m\"\nmax_inflght = 4\n");
+    let err = Config::parse(&typo, lookup).unwrap_err();
+    assert!(err.0.contains("max_inflght"), "{err}");
+    let missing = Config::parse("proxy_token = \"t\"\n", lookup).unwrap_err();
+    assert!(missing.0.contains("listen"), "{missing}");
+    let syntax = Config::parse("listen = \"x\"\n\nproxy_token = \n", lookup).unwrap_err();
+    assert!(syntax.0.contains("line 3"), "{syntax}");
+    let secret = "listen = \"127.0.0.1:0\"\nproxy_token = [\"sk-ant-hunter2\"]\n";
+    let err = Config::parse(secret, lookup).unwrap_err();
+    assert!(err.0.starts_with("invalid config"), "{err}");
+    assert!(!err.0.contains("hunter2"), "{err}");
 }
 
 #[test]

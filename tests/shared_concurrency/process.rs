@@ -28,11 +28,7 @@ impl Replica {
         fs::create_dir(&directory).unwrap();
         let log = fs::File::create(directory.join("process.log")).unwrap();
         let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "scenarios::two_process_stream_lifecycle",
-                "--nocapture",
-            ])
+            .args(["--exact", CHILD_TEST, "--nocapture"])
             .env("LEASE_CHILD_URL", db_url)
             .env("LEASE_CHILD_PERSON", person.0.to_string())
             .env("LEASE_CHILD_DIRECTORY", &directory)
@@ -83,7 +79,20 @@ struct ChildState {
     finish: Arc<Notify>,
 }
 
-pub async fn child() {
+const CHILD_TEST: &str = "process::lease_child_entry";
+
+/// Entry point for the child replica `Replica::start` re-executes this binary into.
+#[tokio::test]
+async fn lease_child_entry() {
+    // A rename that misses CHILD_TEST fails here, not as three child-start timeouts.
+    assert!(std::any::type_name_of_val(&lease_child_entry).ends_with(CHILD_TEST));
+    if std::env::var_os("LEASE_CHILD_URL").is_none() {
+        return;
+    }
+    child().await;
+}
+
+async fn child() {
     let url = std::env::var("LEASE_CHILD_URL").unwrap();
     let person = PersonId(Uuid::parse_str(&std::env::var("LEASE_CHILD_PERSON").unwrap()).unwrap());
     let config = llmproxy::config::PostgresConfig {

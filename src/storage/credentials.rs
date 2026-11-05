@@ -1,6 +1,6 @@
 use super::{PersonId, StorageError, StorageTransaction};
 use crate::secret::CredentialEnvelope;
-use sqlx::Row;
+use sqlx::{Row, postgres::PgRow};
 
 #[path = "../credential/rotation.rs"]
 mod rotation;
@@ -9,7 +9,9 @@ mod service;
 pub use rotation::RotationCounts;
 pub use service::{CredentialSnapshot, CredentialVersion, Credentials};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type, serde::Serialize)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum CredentialState {
     Active,
     Invalid,
@@ -35,23 +37,9 @@ impl StorageTransaction {
         let row = sqlx::query("SELECT generation,state,format_version,key_id,nonce,ciphertext FROM provider_credentials WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' FOR UPDATE")
             .bind(&self.namespace).bind(person).fetch_optional(&mut *self.tx).await?;
         row.map(|row| {
-            let state = match row.try_get::<&str, _>("state")? {
-                "active" => CredentialState::Active,
-                "invalid" => CredentialState::Invalid,
-                "removed" => CredentialState::Removed,
-                _ => return Err(StorageError::InvalidData),
-            };
+            let state = row.try_get("state")?;
             let envelope = match state {
-                CredentialState::Active | CredentialState::Invalid => Some(CredentialEnvelope {
-                    version: u8::try_from(row.try_get::<i32, _>("format_version")?)
-                        .map_err(|_| StorageError::InvalidData)?,
-                    key_id: row.try_get("key_id")?,
-                    nonce: row
-                        .try_get::<Vec<u8>, _>("nonce")?
-                        .try_into()
-                        .map_err(|_| StorageError::InvalidData)?,
-                    ciphertext: row.try_get("ciphertext")?,
-                }),
+                CredentialState::Active | CredentialState::Invalid => Some(envelope(&row)?),
                 CredentialState::Removed => None,
             };
             Ok(CredentialRecord {
@@ -119,4 +107,18 @@ impl StorageTransaction {
             .await?
             .ok_or(StorageError::Conflict)
     }
+}
+
+/// Decodes the envelope columns of a `provider_credentials` row.
+pub(super) fn envelope(row: &PgRow) -> Result<CredentialEnvelope, StorageError> {
+    Ok(CredentialEnvelope {
+        version: u8::try_from(row.try_get::<i32, _>("format_version")?)
+            .map_err(|_| StorageError::InvalidData)?,
+        key_id: row.try_get("key_id")?,
+        nonce: row
+            .try_get::<Vec<u8>, _>("nonce")?
+            .try_into()
+            .map_err(|_| StorageError::InvalidData)?,
+        ciphertext: row.try_get("ciphertext")?,
+    })
 }

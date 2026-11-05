@@ -851,6 +851,24 @@ async fn a_retry_after_beyond_the_budget_is_not_waited_for() {
 }
 
 #[tokio::test]
+async fn a_retry_after_too_large_for_a_clock_is_passed_through() {
+    // u64::MAX seconds cannot be added to an Instant; it must count as "beyond the budget".
+    let h = start_with("3s", "").await;
+    let response = h
+        .post(
+            "/minimax/limited?fail=1000&after=18446744073709551615",
+            "{}",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 429);
+    assert_eq!(response.headers()["retry-after"], "18446744073709551615");
+    assert_eq!(response.headers()["x-proxy-retries"], "0");
+    assert_eq!(h.hits(), 1);
+}
+
+#[tokio::test]
 async fn a_route_can_turn_upstream_429_retries_off() {
     // The budget would allow a retry, so only the route's switch is what stops one.
     let h = start_with("5s", "").await;

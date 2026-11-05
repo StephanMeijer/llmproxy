@@ -3,7 +3,11 @@ use argon2::{
     Argon2, Params,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use std::{fmt, num::NonZeroUsize, sync::Arc};
+use std::{
+    fmt::{self, Write as _},
+    num::NonZeroUsize,
+    sync::Arc,
+};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -14,7 +18,6 @@ const TOKEN_HEX_LEN: usize = TOKEN_BYTES * 2;
 const MAX_HASH_MEMORY_KIB: u32 = 65_536;
 const MAX_HASH_ITERATIONS: u32 = 4;
 const MAX_HASH_LANES: u32 = 4;
-const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Public UUID identifier plus a 256-bit random secret, wiped on drop.
 pub struct ProxyToken {
@@ -29,14 +32,13 @@ impl ProxyToken {
     pub fn generate() -> Result<Self, SecretError> {
         let id = Uuid::from_bytes(random()?);
         let bytes = Zeroizing::new(random::<TOKEN_BYTES>()?);
-        let mut encoded = Zeroizing::new(format!("{id}."));
+        // Full capacity up front: a reallocation would leave an unwiped copy of the secret behind.
+        let mut encoded = Zeroizing::new(String::with_capacity(
+            uuid::fmt::Hyphenated::LENGTH + 1 + TOKEN_HEX_LEN,
+        ));
+        write!(encoded, "{id}.").map_err(|_| SecretError::InvalidToken)?;
         for byte in bytes.iter() {
-            for digit in [byte >> 4, byte & 15] {
-                let character = HEX
-                    .get(usize::from(digit))
-                    .ok_or(SecretError::InvalidToken)?;
-                encoded.push(char::from(*character));
-            }
+            write!(encoded, "{byte:02x}").map_err(|_| SecretError::InvalidToken)?;
         }
         Ok(Self { id, encoded })
     }
