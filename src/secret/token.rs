@@ -7,8 +7,9 @@ use std::{
     fmt::{self, Write as _},
     num::NonZeroUsize,
     sync::Arc,
+    time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -82,31 +83,49 @@ impl fmt::Debug for ProxyToken {
     }
 }
 
-/// Shared fail-fast bound for CPU/memory-heavy Argon2id operations.
-/// A cancelled caller does not release capacity until its worker finishes.
+/// Shared bound for CPU/memory-heavy Argon2id operations. Only running workers hold memory;
+/// callers waiting for a slot hold none. A cancelled caller does not release capacity until its
+/// worker finishes.
 #[derive(Clone, Debug)]
 pub struct TokenHasher {
     slots: Arc<Semaphore>,
+    wait: Duration,
 }
 
 impl TokenHasher {
-    /// Sets the maximum number of concurrently running hashing workers.
+    /// Sets the maximum number of concurrently running hashing workers. Fails fast with `Busy`
+    /// when all are running; see [`TokenHasher::waiting`].
     #[must_use]
     pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
             slots: Arc::new(Semaphore::new(capacity.get())),
+            wait: Duration::ZERO,
         }
+    }
+
+    /// Waits up to `wait` for a free worker before returning `Busy`, in arrival order.
+    #[must_use]
+    pub const fn waiting(mut self, wait: Duration) -> Self {
+        self.wait = wait;
+        self
+    }
+
+    async fn slot(&self) -> Result<OwnedSemaphorePermit, SecretError> {
+        let slots = Arc::clone(&self.slots);
+        if self.wait.is_zero() {
+            return slots.try_acquire_owned().map_err(|_| SecretError::Busy);
+        }
+        tokio::time::timeout(self.wait, slots.acquire_owned())
+            .await
+            .map_err(|_| SecretError::Busy)?
+            .map_err(|_| SecretError::Busy)
     }
 
     /// Hashes a token with a fresh salt and stores Argon2id parameters in PHC format.
     /// # Errors
-    /// Returns `Busy` at capacity, or a redacted randomness/hash/worker error.
+    /// Returns `Busy` when no worker frees up in time, or a redacted randomness/hash/worker error.
     pub async fn hash(&self, token: &ProxyToken) -> Result<String, SecretError> {
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| SecretError::Busy)?;
+        let permit = self.slot().await?;
         let token = Zeroizing::new(token.expose().to_owned());
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -134,11 +153,7 @@ impl TokenHasher {
         {
             return Err(SecretError::InvalidHash);
         }
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| SecretError::Busy)?;
+        let permit = self.slot().await?;
         let token = Zeroizing::new(token.expose().to_owned());
         let encoded = encoded.to_owned();
         tokio::task::spawn_blocking(move || {

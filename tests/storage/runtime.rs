@@ -118,6 +118,27 @@ async fn pool_exhaustion_and_missing_schema_return_typed_errors() {
 }
 
 #[tokio::test]
+async fn schema_check_lock_wait_is_bounded() {
+    // Given a migrated schema whose migration table another session locks exclusively.
+    let mut db = database::Database::new().await;
+    db.config.acquire_timeout = SHORT;
+    storage::migrate(&db.config).await.unwrap();
+    let store = Storage::new(&db.config).unwrap();
+    let mut locker = db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    // When a transaction opens and its schema check waits on that lock.
+    let result = tokio::time::timeout(LONG, store.begin()).await.unwrap();
+    // Then the session lock timeout ends the wait with the unavailable category.
+    assert!(matches!(result, Err(StorageError::Unavailable)));
+    locker.rollback().await.unwrap();
+    store.close().await;
+    db.close().await;
+}
+
+#[tokio::test]
 async fn listener_reconnect_gap_forces_authoritative_reload() {
     // Given a connected subscriber.
     let (db, writer, person) = setup().await;

@@ -20,11 +20,32 @@ async fn upstream_connection_failure_returns_502_and_releases_leases() {
         )
         .await;
     f.stop_upstream().await;
-    // When Claude attempts the upstream connection.
-    let response = f.request(&a, false).send().await.unwrap();
+    // When Claude attempts the upstream connection, with a query string the log must not keep.
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/claude/v1/messages?canary=query-string-canary",
+            a.base
+        ))
+        .bearer_auth(f.alice.expose())
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .body(BODY)
+        .send()
+        .await
+        .unwrap();
     // Then the proxy returns502 and releases its admitted concurrency.
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     f.state_count("concurrency_leases", 0).await;
+    // And the operator can see why in the log (the refused connection), as for static routes.
+    let log = std::fs::read_to_string(&a.log).unwrap();
+    assert!(
+        log.lines()
+            .any(|line| line.contains("upstream request failed")
+                && line.contains("\"route\":\"claude\"")
+                && line.contains("ConnectionRefused")),
+        "{log}"
+    );
+    assert!(!log.contains("query-string-canary"), "{log}");
     artifact(
         "upstream-failure.txt",
         "PASS stopped provider listener returns502; admitted lease released; sanitized response/log\n",
@@ -66,6 +87,7 @@ async fn retry_beyond_deadline_preserves_provider_429_and_headers() {
 #[tokio::test]
 async fn two_replicas_preserve_bytes_tools_headers_and_person_credentials() {
     // Given two real replicas sharing encrypted Alice/Bob credentials.
+    let container = crate::pg_dump::credential_container();
     let mut f = Fixture::new().await;
     let a = f.binary("", "").await;
     let b = f.binary("", "").await;
@@ -133,31 +155,14 @@ async fn two_replicas_preserve_bytes_tools_headers_and_person_credentials() {
         "native.txt",
         "PASS two binary replicas, Alice/Bob key isolation, byte-exact tool JSON, native repeated beta/version headers, query, 201/status/usage/rate headers, hop and auth stripping\n",
     );
-    let url = reqwest::Url::parse(&f.db.config.url).unwrap();
-    let dump = Command::new("docker")
-        .args([
-            "exec",
-            &std::env::var("LLMPROXY_CREDENTIAL_CONTAINER").unwrap(),
-            "pg_dump",
-            "-U",
-            "postgres",
-            url.path().trim_start_matches('/'),
-        ])
-        .output()
-        .unwrap();
-    assert!(dump.status.success());
+    let dump = crate::pg_dump::pg_dump(&container, &f.db.config.url);
     for secret in [
         ALICE_KEY,
         BOB_KEY,
         f.alice.expose().as_bytes(),
         f.bob.expose().as_bytes(),
     ] {
-        assert!(
-            !dump
-                .stdout
-                .windows(secret.len())
-                .any(|window| window == secret)
-        );
+        assert!(!dump.windows(secret.len()).any(|window| window == secret));
     }
     artifact(
         "dump-scan.txt",

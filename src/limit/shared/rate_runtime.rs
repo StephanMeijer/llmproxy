@@ -1,11 +1,16 @@
 use super::{AdmissionStore, SharedCharge};
 use crate::{
-    limit::shared::LeaseGuard,
+    limit::shared::{LeaseGuard, SharedDefinition},
     storage::{
         ChangeListener, FencedLease, Lease, LimitKey, OwnerId, PersonId, Storage, StorageError,
     },
 };
-use std::{fmt, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -37,6 +42,8 @@ pub struct SharedRateStore {
     storage: Storage,
     owner: OwnerId,
     max_wait: Duration,
+    /// Keys whose definition this process already stored; only a successful `put_limit` adds one.
+    defined: Arc<Mutex<HashSet<LimitKey>>>,
 }
 
 impl SharedRateStore {
@@ -46,6 +53,52 @@ impl SharedRateStore {
             storage,
             owner: OwnerId(Uuid::new_v4()),
             max_wait,
+            defined: Arc::default(),
+        }
+    }
+
+    fn defined(&self, key: &LimitKey) -> bool {
+        self.defined.lock().is_ok_and(|keys| keys.contains(key))
+    }
+
+    fn set_defined(&self, key: &LimitKey, defined: bool) {
+        if let Ok(mut keys) = self.defined.lock() {
+            if defined {
+                keys.insert(key.clone());
+            } else {
+                keys.remove(key);
+            }
+        }
+    }
+
+    /// Enqueues, storing the definition only on this process's first admission for the key.
+    async fn enqueue(
+        &self,
+        key: &LimitKey,
+        definition: &SharedDefinition,
+        reservation: &Lease,
+        ttl: Duration,
+    ) -> Result<(), StorageError> {
+        let mut cached = self.defined(key);
+        loop {
+            let mut tx = self.storage.begin().await?;
+            if !cached {
+                tx.put_limit(key, definition).await?;
+            }
+            match tx.enqueue(key, reservation, ttl).await {
+                // The row vanished since it was cached: forget it and put it once more.
+                Err(StorageError::NotFound) if cached => {
+                    self.set_defined(key, false);
+                    cached = false;
+                    tx.rollback().await?;
+                }
+                result => {
+                    result?;
+                    tx.commit().await?;
+                    self.set_defined(key, true);
+                    return Ok(());
+                }
+            }
         }
     }
 }
@@ -125,15 +178,13 @@ impl AdmissionStore for SharedRateStore {
                 },
                 active: true,
             };
-            let mut tx = self.storage.begin().await?;
-            tx.put_limit(&queued.key, charge.definition).await?;
-            tx.enqueue(
+            self.enqueue(
                 &queued.key,
+                charge.definition,
                 &queued.reservation,
                 max_wait.saturating_sub(enqueue_started.elapsed()),
             )
             .await?;
-            tx.commit().await?;
             let mut listener = ChangeListener::new(self.storage.clone());
             loop {
                 let started = Instant::now();
@@ -178,8 +229,8 @@ impl AdmissionStore for SharedRateStore {
                 } else {
                     tx.rollback().await?;
                 }
-                match listener.limit(&queued.key, POLL_INTERVAL).await {
-                    Ok(_) => {}
+                match listener.changed(POLL_INTERVAL).await {
+                    Ok(()) => {}
                     Err(StorageError::Unavailable) => tokio::time::sleep(POLL_INTERVAL).await,
                     Err(error) => return Err(error.into()),
                 }

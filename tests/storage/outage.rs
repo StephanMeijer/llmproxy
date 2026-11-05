@@ -57,9 +57,7 @@ async fn assert_connections_released(config: &PostgresConfig) {
 
 #[tokio::test]
 async fn postgres_stop_restart_recovers_same_runtime_and_listener() {
-    // Given an explicitly configured test database and a dedicated PostgreSQL 18 container.
-    env::var("LLMPROXY_TEST_DATABASE_URL")
-        .expect("set LLMPROXY_TEST_DATABASE_URL; storage integration tests never skip");
+    // Given a dedicated PostgreSQL 18 container.
     let container = Container(format!("llmproxy-storage-{}", Uuid::new_v4().simple()));
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -165,8 +163,6 @@ async fn postgres_stop_restart_recovers_same_runtime_and_listener() {
 #[tokio::test]
 async fn static_binary_starts_and_serves_while_database_is_absent() {
     // Given a configured but unreachable database and a free HTTP listener.
-    env::var("LLMPROXY_TEST_DATABASE_URL")
-        .expect("set LLMPROXY_TEST_DATABASE_URL; storage integration tests never skip");
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()

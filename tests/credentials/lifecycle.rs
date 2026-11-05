@@ -50,6 +50,7 @@ async fn concurrent_replacement_has_one_winner_and_snapshot_survives_removal() {
 
 #[tokio::test]
 async fn duplicate_key_is_rejected_across_people_and_dump_contains_no_plaintext() {
+    let container = crate::pg_dump::credential_container();
     // Given Alice's encrypted key.
     let (db, store, alice, bob) = setup().await;
     let credentials = service(&store, ring("old", &[("old", 1)]));
@@ -59,23 +60,10 @@ async fn duplicate_key_is_rejected_across_people_and_dump_contains_no_plaintext(
     let duplicate = credentials.install(bob, &secret).await;
     // Then ownership is rejected and a real database dump contains no plaintext.
     assert_eq!(duplicate.unwrap_err(), StorageError::Conflict);
-    let container = std::env::var("LLMPROXY_CREDENTIAL_CONTAINER").unwrap();
-    let url = reqwest::Url::parse(&db.config.url).unwrap();
-    let dump = std::process::Command::new("docker")
-        .args([
-            "exec",
-            &container,
-            "pg_dump",
-            "-U",
-            "postgres",
-            url.path().trim_start_matches('/'),
-        ])
-        .output()
-        .unwrap();
-    assert!(dump.status.success());
-    assert!(!dump.stdout.windows(ALICE.len()).any(|bytes| bytes == ALICE));
-    assert!(!dump.stdout.windows(BOB.len()).any(|bytes| bytes == BOB));
-    artifact("credentials.sql", &dump.stdout);
+    let dump = crate::pg_dump::pg_dump(&container, &db.config.url);
+    assert!(!dump.windows(ALICE.len()).any(|bytes| bytes == ALICE));
+    assert!(!dump.windows(BOB.len()).any(|bytes| bytes == BOB));
+    artifact("credentials.sql", &dump);
     artifact("dump-duplicate.txt", b"PASS: identical credential across people rejected; pg_dump successful; both seeded plaintext values absent\n");
     store.close().await;
     db.close().await;

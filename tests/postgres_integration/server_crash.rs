@@ -232,4 +232,5 @@ async fn killed_postgres_restarts_durably_and_both_live_replicas_recover() {
     }
     assert_eq!(f.order, ["alice", "alice", "alice"]);
     f.record(json!({"fault":"docker kill --signal KILL on test-created container ID","postgres_restart":"same container and durable volume","postgres_started":postgres_started,"postgres_restarted":postgres_restarted,"proxy_pids_before":proxy_pids,"proxy_pids_after":[a.pid(),b.pid()],"proxy_restarts":0,"before_kill":{"leases":1,"waiters":1},"during_outage":{"static_statuses":[200,200],"personal_statuses":[503,503],"queued_status":503,"provider_hits":0},"confirmed_expiry_seconds":remaining,"provider_cancel_seconds":cancelled_after,"active_credentials_after_restart":credentials,"recovered_statuses":[200,200],"cleanup":"database Drop then owned container rm --force --volumes"})).await;
+    f.close(vec![a, b]);
 }

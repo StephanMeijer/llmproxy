@@ -15,14 +15,17 @@ use llmproxy::{
     secret::ProxyToken,
     storage::Storage,
 };
+use std::time::Duration;
 use support::{Fixture, LEGACY};
+
+const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn route_token_database_matrix_preserves_person_identity() {
     let fixture = Fixture::new().await;
     let unavailable = fixture.unavailable_config().await;
     for (available, postgres) in [(true, &fixture.db.config), (false, &unavailable)] {
-        let auth = Authenticator::new(LEGACY.into(), Some(Storage::new(postgres).unwrap()));
+        let auth = Authenticator::new(LEGACY.into(), Some(Storage::new(postgres).unwrap()), WAIT);
         let (base, _servers) = http::start(postgres).await;
         let client = reqwest::Client::new();
         for route in [
@@ -122,7 +125,7 @@ async fn route_token_database_matrix_preserves_person_identity() {
 
 #[tokio::test]
 async fn ambiguous_headers_fail_before_database_access() {
-    let auth = Authenticator::new(LEGACY.into(), None);
+    let auth = Authenticator::new(LEGACY.into(), None, WAIT);
     for headers in [
         vec![("authorization", "Bearer legacy"), ("x-api-key", "legacy")],
         vec![
@@ -151,7 +154,7 @@ async fn ambiguous_headers_fail_before_database_access() {
 #[tokio::test]
 async fn wrong_secret_and_unusable_hash_fail_closed() {
     let fixture = Fixture::new().await;
-    let auth = Authenticator::new(LEGACY.into(), Some(fixture.storage.clone()));
+    let auth = Authenticator::new(LEGACY.into(), Some(fixture.storage.clone()), WAIT);
     let wrong = ProxyToken::parse(&format!("{}.{}", fixture.alice.id(), "0".repeat(64))).unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_str(wrong.expose()).unwrap());
@@ -180,6 +183,31 @@ async fn wrong_secret_and_unusable_hash_fail_closed() {
         auth.authenticate(RouteKind::Static, &headers).await,
         Err(AuthError::Unavailable)
     );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_person_tokens_wait_for_a_verifier_instead_of_failing() {
+    // Given two valid person tokens and more simultaneous requests than verifier slots.
+    let fixture = Fixture::new().await;
+    let auth = Authenticator::new(LEGACY.into(), Some(fixture.storage.clone()), WAIT);
+    let tokens = [
+        (fixture.alice.expose(), fixture.alice_id),
+        (fixture.bob.expose(), fixture.bob_id),
+    ];
+    // When eight requests authenticate at once.
+    let requests: Vec<_> = tokens.iter().cycle().take(8).collect();
+    let results = futures_util::future::join_all(requests.iter().map(|(token, _)| {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_str(token).unwrap());
+        let auth = &auth;
+        async move { auth.authenticate(RouteKind::Static, &headers).await }
+    }))
+    .await;
+    // Then every one is authenticated as its own person; none is told the database is down.
+    for (n, (result, (_, person))) in results.into_iter().zip(requests).enumerate() {
+        assert_eq!(result, Ok(Some(Principal::Person(*person))), "request {n}");
+    }
     fixture.close().await;
 }
 

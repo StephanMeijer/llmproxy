@@ -64,6 +64,7 @@ async fn database_outage_cancels_renewal_and_recovers_while_static_continues() {
     );
     f.db.count("concurrency_leases", 0).await;
     f.record(json!({"outage_personal_status":503,"startup_during_outage":true,"static_status":200,"confirmed_expiry_seconds":remaining,"renewal_cancel_seconds":cancelled_after,"recovered_status":200})).await;
+    f.close(vec![a, b]);
 }
 
 #[tokio::test]
@@ -108,6 +109,7 @@ async fn incompatible_schema_and_failed_transaction_never_reach_provider() {
     );
     f.db.count("concurrency_leases", 0).await;
     f.record(json!({"transaction_failure_status":503,"schema_mismatch_status":503,"static_status":200,"restored_status":200})).await;
+    f.close(vec![a, b]);
 }
 
 #[tokio::test]
@@ -155,6 +157,7 @@ async fn terminated_waiter_expires_and_live_waiter_advances() {
     f.db.count("concurrency_leases", 0).await;
     f.record(json!({"crash":"SIGKILL","expired_waiter_reaped":true,"live_status":200}))
         .await;
+    f.close(vec![a, b]);
 }
 
 #[tokio::test]
@@ -175,6 +178,7 @@ async fn upstream_connection_error_releases_all_shared_leases() {
     }
     f.record(json!({"statuses":[502,502],"provider_hits":0}))
         .await;
+    f.close(vec![a, b]);
 }
 
 #[tokio::test]
@@ -212,4 +216,5 @@ async fn wrong_key_on_startup_fails_closed_with_static_continuity() {
         json!({"wrong_key_status":503,"wrong_key_static_status":200,"healthy_replica_status":200}),
     )
     .await;
+    f.close(vec![a, b]);
 }

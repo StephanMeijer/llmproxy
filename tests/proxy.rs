@@ -457,6 +457,15 @@ async fn streams_without_buffering() {
 
 #[tokio::test]
 async fn reports_upstream_failure_as_502() {
+    // Capture this test's log; current-thread runtime, so the handler's events land here too.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let writer = log.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || LogBuf(writer.clone()))
+            .finish(),
+    );
     let h = start().await;
     let dead = TcpListener::bind("127.0.0.1:0")
         .await
@@ -472,7 +481,7 @@ async fn reports_upstream_failure_as_502() {
     .await;
     let response = h
         .client
-        .get(format!("http://{addr}/dead/x"))
+        .get(format!("http://{addr}/dead/x?canary=query-string-canary"))
         .bearer_auth(TOKEN)
         .send()
         .await
@@ -480,6 +489,29 @@ async fn reports_upstream_failure_as_502() {
     assert_eq!(response.status(), 502);
     let body: Value = json_body(response).await;
     assert_eq!(body["error"]["type"], "upstream_error");
+    // The operator sees why (the refused connection), but never the client's query string.
+    let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.lines()
+            .any(|line| line.contains("upstream request failed")
+                && line.contains("ConnectionRefused")),
+        "{log}"
+    );
+    assert!(!log.contains("query-string-canary"), "{log}");
+}
+
+/// Appends log output to a shared buffer.
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[tokio::test]

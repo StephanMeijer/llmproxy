@@ -69,6 +69,7 @@ async fn committed_fifo_crosses_replicas_and_disconnect_releases_capacity() {
     f.db.count("fifo_waiters", 0).await;
     f.record(json!({"committed_enqueue_order":orders,"disconnect_released":true}))
         .await;
+    f.close(vec![a, b]);
 }
 
 #[tokio::test]
@@ -150,6 +151,7 @@ async fn killed_stream_owner_is_reclaimed_only_after_database_expiry() {
         json!({"crash":"SIGKILL","remaining_at_kill_seconds":remaining,"survivor_status":200}),
     )
     .await;
+    f.close(vec![a, b]);
 }
 
 #[tokio::test]
@@ -191,6 +193,7 @@ async fn aggregate_request_and_token_budgets_timeout_without_second_provider_hit
         f.db.count("fifo_waiters", 0).await;
         f.record(json!({"second_status":429,"max_wait_seconds":1,"aggregate_provider_hits":1}))
             .await;
+        f.close(vec![a, b]);
     }
 }
 
@@ -247,4 +250,5 @@ async fn cancelled_waiter_is_removed_without_provider_dispatch() {
         json!({"cancelled_waiter_removed":true,"cancelled_provider_hits":0,"next_status":200}),
     )
     .await;
+    f.close(vec![a, b]);
 }
