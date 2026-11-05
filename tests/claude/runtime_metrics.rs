@@ -68,6 +68,11 @@ pub fn counts(text: &str, expected: [u64; 4]) {
 }
 
 pub async fn connections(f: &Fixture, enabled: bool) {
+    connections_except(f, enabled, None).await;
+}
+
+/// Like `connections`, but disabling spares the backend `keep`.
+async fn connections_except(f: &Fixture, enabled: bool, keep: Option<i32>) {
     let name = reqwest::Url::parse(&f.db.config.url)
         .unwrap()
         .path()
@@ -80,8 +85,9 @@ pub async fn connections(f: &Fixture, enabled: bool) {
     .await
     .unwrap();
     if !enabled {
-        sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1")
+        sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid IS DISTINCT FROM $2")
             .bind(name)
+            .bind(keep)
             .execute(&f.db.admin)
             .await
             .unwrap();
@@ -121,7 +127,13 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
         &scrape(&f, &binary, "removed", Some([0, 1, 1, 0])).await,
         [0, 1, 1, 0],
     );
-    connections(&f, false).await;
+    // The test keeps one connection so it can write while the binary is cut off.
+    let mut writer = f.db.pool.acquire().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    connections_except(&f, false, Some(pid)).await;
     assert_eq!(
         f.request(&binary, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -129,14 +141,17 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
     let text = scrape(&f, &binary, "outage", Some([0, 1, 1, 0])).await;
     counts(&text, [0, 1, 1, 0]);
     assert!(text.contains("llm3_postgres_available 0\n"));
+    // A change the listener cannot hear: only the reconnect refresh can report it.
+    sqlx::query("UPDATE provider_credentials SET state='active' WHERE person_id=$1")
+        .bind(f.alice_version.person)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    drop(writer);
     connections(&f, true).await;
-    assert_eq!(
-        f.request(&binary, false).send().await.unwrap().status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    let text = scrape(&f, &binary, "recovery", Some([0, 1, 1, 0])).await;
-    // Then counts remain authoritative even though invalid credentials cannot forward.
-    counts(&text, [0, 1, 1, 0]);
+    let text = scrape(&f, &binary, "recovery", Some([1, 0, 1, 0])).await;
+    // Then counts follow durable state changed during the outage, with no request in between.
+    counts(&text, [1, 0, 1, 0]);
     assert!(text.contains("llm3_postgres_available 1\n"));
     f.close(vec![binary]).await;
 }
@@ -207,5 +222,67 @@ async fn real_binary_counts_corrupt_and_missing_key_envelopes_as_unavailable() {
     counts(&text, [0, 0, 0, 2]);
     assert!(text.contains("llm3_postgres_available 1\n"));
     assert!(!text.contains("missing-key-canary"));
+    f.close(vec![binary]).await;
+}
+
+#[tokio::test]
+async fn real_binary_retries_a_failed_count_refresh_without_a_new_change() {
+    // Given a binary whose credential table is locked by a change that sends no notification.
+    let mut f = Fixture::new().await;
+    let binary = f.binary("", "").await;
+    let request = tokio::spawn(f.request(&binary, false).send());
+    reply(f.hit().await, StatusCode::OK, "ok");
+    assert_eq!(request.await.unwrap().unwrap().status(), StatusCode::OK);
+    counts(
+        &scrape(&f, &binary, "retry-before", Some([2, 0, 0, 0])).await,
+        [2, 0, 0, 0],
+    );
+    let mut tx = f.db.pool.begin().await.unwrap();
+    // DISABLE TRIGGER alone takes a lock that still lets reads through.
+    for statement in [
+        "LOCK TABLE provider_credentials IN ACCESS EXCLUSIVE MODE",
+        "ALTER TABLE provider_credentials DISABLE TRIGGER credential_change",
+    ] {
+        sqlx::query(statement).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("UPDATE provider_credentials SET state='invalid' WHERE person_id=$1")
+        .bind(f.alice_version.person)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE provider_credentials ENABLE TRIGGER credential_change")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    // When a wake-up makes the count scan hit the lock timeout once.
+    sqlx::query("SELECT pg_notify('llmproxy_credentials', '')")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let waiting = "SELECT query_start::text FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT person_id,state,%'";
+    let started: String = loop {
+        if let Some(started) = sqlx::query_scalar(waiting)
+            .fetch_optional(&f.db.pool)
+            .await
+            .unwrap()
+        {
+            break started;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    while sqlx::query_scalar::<_, String>(waiting)
+        .fetch_all(&f.db.pool)
+        .await
+        .unwrap()
+        .contains(&started)
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tx.commit().await.unwrap();
+    // Then a retry, not a notification, reports the committed change.
+    counts(
+        &scrape(&f, &binary, "retry-after", Some([1, 1, 0, 0])).await,
+        [1, 1, 0, 0],
+    );
     f.close(vec![binary]).await;
 }

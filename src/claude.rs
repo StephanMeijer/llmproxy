@@ -18,6 +18,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 pub(super) const MESSAGES_PATH: &str = "/claude/v1/messages";
+const COUNTS_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(super) struct Claude {
     route: Route,
@@ -211,7 +212,8 @@ impl Claude {
     }
 }
 
-/// Refreshes credential counts once now, then on every credential change or request.
+/// Refreshes credential counts once now, then on every credential change or request,
+/// retrying a failed scan every `COUNTS_RETRY` until one succeeds.
 /// Ends when the adapter (the only sender) is dropped or storage closes the listener.
 fn spawn_counts(
     credentials: Arc<Credentials>,
@@ -222,12 +224,16 @@ fn spawn_counts(
     tokio::spawn(async move {
         loop {
             changes.borrow_and_update();
-            if let Ok(counts) = credentials.counts().await {
+            let scan = credentials.counts().await;
+            let failed = scan.is_err();
+            if let Ok(counts) = scan {
                 metrics.set_credentials(CredentialProvider::Anthropic, counts);
             }
             tokio::select! {
                 result = changes.changed() => if result.is_err() { break },
                 request = woken.recv() => if request.is_none() { break },
+                // A failed scan retries on its own; the next change may never come.
+                () = tokio::time::sleep(COUNTS_RETRY), if failed => {},
             }
         }
     });
