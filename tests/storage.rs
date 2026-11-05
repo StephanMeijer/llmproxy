@@ -62,6 +62,35 @@ fn definition() -> SharedDefinition {
 }
 
 #[tokio::test]
+async fn putting_an_unchanged_definition_does_not_rewrite_its_row() {
+    // Given a stored definition.
+    let (db, store, person) = setup().await;
+    let key = LimitKey {
+        person,
+        name: "budget".into(),
+    };
+    let row = || async {
+        sqlx::query_as::<_, (String, i64)>("SELECT xmin::text, version FROM limit_definitions")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    };
+    let mut tx = store.begin().await.unwrap();
+    let first = tx.put_limit(&key, &definition()).await.unwrap();
+    tx.commit().await.unwrap();
+    let before = row().await;
+    // When every request puts the same definition again.
+    let mut tx = store.begin().await.unwrap();
+    let second = tx.put_limit(&key, &definition()).await.unwrap();
+    tx.commit().await.unwrap();
+    // Then it reports the same version without writing a new row version.
+    assert_eq!(second, first);
+    assert_eq!(row().await, before);
+    store.close().await;
+    db.close().await;
+}
+
+#[tokio::test]
 async fn repositories_reject_invalid_state_changes_and_report_conflicts() {
     let (db, store, person) = setup().await;
     let key = LimitKey {
