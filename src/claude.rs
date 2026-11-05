@@ -171,8 +171,8 @@ impl Claude {
         let (upstream, retries) = match result {
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
-                // without_url: the URL carries the client's query string, which is never logged.
-                tracing::warn!(route = "claude", error = %e.without_url(), "upstream request failed");
+                // Debug keeps the source chain (refused, DNS); without_url drops the client's query string.
+                tracing::warn!(route = "claude", error = ?e.without_url(), "upstream request failed");
                 return error(
                     StatusCode::BAD_GATEWAY,
                     "upstream_error",
