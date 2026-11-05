@@ -10,15 +10,16 @@ async fn lease_cancellation_runs_live_work_and_rejects_expired_work() {
     let (db, storage, key) = setup().await;
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let mut tx = storage.begin().await.unwrap();
-    assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
-    let guard = LeaseGuard::start(storage.clone(), (key.clone(), lease), Instant::now());
+    let guard = LeaseGuard::start(storage.clone(), key.clone(), lease, Instant::now());
     assert_eq!(guard.cancellation().run(async { 42 }).await, Ok(42));
     drop(guard);
     eventually_count(&db.pool, "leases", 0).await;
     let expired = LeaseGuard::start(
         storage.clone(),
-        (key, lease),
+        key,
+        lease,
         Instant::now() - (LEASE_LIFETIME + Duration::from_secs(1)),
     );
     assert_eq!(
@@ -39,12 +40,12 @@ async fn repository_rejects_invalid_capacity_generation_and_definition_identity(
     let mut tx = storage.begin().await.unwrap();
     let mut lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     assert_eq!(
-        tx.acquire_concurrency(&key, (&lease, 0)).await,
+        tx.acquire_concurrency(&key, &lease, 0).await,
         Err(StorageError::InvalidData)
     );
     lease.generation = 0;
     assert_eq!(
-        tx.acquire_concurrency(&key, (&lease, 1)).await,
+        tx.acquire_concurrency(&key, &lease, 1).await,
         Err(StorageError::InvalidData)
     );
     let other_key = LimitKey {

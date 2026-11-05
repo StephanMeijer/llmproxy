@@ -114,7 +114,8 @@ impl LeaseGuard {
     /// transaction, so network/lock/commit latency consumes the confirmed lifetime.
     pub fn start(
         storage: Storage,
-        reservation: (LimitKey, FencedLease),
+        key: LimitKey,
+        lease: FencedLease,
         operation_started: Instant,
     ) -> Self {
         let (cancel, cancellation) = watch::channel(LeaseStatus::Active(
@@ -123,7 +124,8 @@ impl LeaseGuard {
         let (finished, completion) = oneshot::channel();
         let controller = Controller {
             storage,
-            reservation,
+            key,
+            lease,
             cancel,
             completion,
         };
@@ -144,7 +146,8 @@ impl LeaseGuard {
 
 struct Controller {
     storage: Storage,
-    reservation: (LimitKey, FencedLease),
+    key: LimitKey,
+    lease: FencedLease,
     cancel: watch::Sender<LeaseStatus>,
     completion: oneshot::Receiver<()>,
 }
@@ -169,7 +172,7 @@ impl Controller {
             let attempt_deadline = deadline.min(renewal_started + OPERATION_TIMEOUT);
             let result = tokio::select! { biased;
                 _ = &mut self.completion => break,
-                result = tokio::time::timeout_at(attempt_deadline, renew(&self.storage, &self.reservation)) => result,
+                result = tokio::time::timeout_at(attempt_deadline, renew(&self.storage, &self.key, &self.lease)) => result,
             };
             match result {
                 Ok(Ok(true)) => {
@@ -205,18 +208,18 @@ impl Controller {
 
     async fn release(&self) -> Result<(), StorageError> {
         let mut tx = self.storage.begin().await?;
-        tx.release_concurrency(&self.reservation.0, &self.reservation.1)
-            .await?;
+        tx.release_concurrency(&self.key, &self.lease).await?;
         tx.commit().await
     }
 }
 
 async fn renew(
     storage: &Storage,
-    reservation: &(LimitKey, FencedLease),
+    key: &LimitKey,
+    lease: &FencedLease,
 ) -> Result<bool, StorageError> {
     let mut tx = storage.begin().await?;
-    let renewed = tx.renew_concurrency(&reservation.0, &reservation.1).await?;
+    let renewed = tx.renew_concurrency(key, lease).await?;
     tx.commit().await?;
     Ok(renewed)
 }

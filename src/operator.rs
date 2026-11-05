@@ -27,7 +27,8 @@ struct IssuedToken<'a> {
 
 enum Command<'a> {
     Create(&'a str),
-    Person(PersonId, bool),
+    Status(PersonId),
+    Disable(PersonId),
     Issue(PersonId),
     Revoke(TokenId),
     Claude(PersonId, Claude),
@@ -35,7 +36,7 @@ enum Command<'a> {
 }
 
 enum Claude {
-    Set(bool),
+    Set { from_stdin: bool },
     Remove,
     Status,
 }
@@ -45,16 +46,18 @@ impl<'a> Command<'a> {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         Ok(match words.as_slice() {
             ["auth", "person", "create", name] if !name.trim().is_empty() => Self::Create(name),
-            ["auth", "person", "status", id] => Self::Person(PersonId(Uuid::parse_str(id)?), false),
-            ["auth", "person", "disable", id] => Self::Person(PersonId(Uuid::parse_str(id)?), true),
+            ["auth", "person", "status", id] => Self::Status(PersonId(Uuid::parse_str(id)?)),
+            ["auth", "person", "disable", id] => Self::Disable(PersonId(Uuid::parse_str(id)?)),
             ["auth", "token", "issue", id] => Self::Issue(PersonId(Uuid::parse_str(id)?)),
             ["auth", "token", "revoke", id] => Self::Revoke(TokenId(Uuid::parse_str(id)?)),
-            ["auth", "claude", "set", id] => {
-                Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Set(false))
-            }
-            ["auth", "claude", "set", id, "--credential-stdin"] => {
-                Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Set(true))
-            }
+            ["auth", "claude", "set", id] => Self::Claude(
+                PersonId(Uuid::parse_str(id)?),
+                Claude::Set { from_stdin: false },
+            ),
+            ["auth", "claude", "set", id, "--credential-stdin"] => Self::Claude(
+                PersonId(Uuid::parse_str(id)?),
+                Claude::Set { from_stdin: true },
+            ),
             ["auth", "claude", "remove", id] => {
                 Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Remove)
             }
@@ -110,16 +113,18 @@ async fn execute(
             tx.commit().await?;
             Ok(Output::Metadata(person_output(&person)))
         }
-        Command::Person(id, disable) => {
+        Command::Status(id) => {
+            let mut tx = store.begin().await?;
+            let person = tx.person(id).await?;
+            tx.rollback().await?;
+            Ok(Output::Metadata(person_output(&person)))
+        }
+        Command::Disable(id) => {
             let mut tx = store.begin().await?;
             let mut person = tx.person(id).await?;
-            if disable {
-                person.enabled = false;
-                person = tx.update_person(&person).await?;
-                tx.commit().await?;
-            } else {
-                tx.rollback().await?;
-            }
+            person.enabled = false;
+            person = tx.update_person(&person).await?;
+            tx.commit().await?;
             Ok(Output::Metadata(person_output(&person)))
         }
         Command::Issue(id) => {
@@ -145,7 +150,7 @@ async fn execute(
                 json!({"token_id": id.0, "person_id": person.id.0, "label": person.display_name, "revoked": true}),
             ))
         }
-        Command::Claude(id, operation) => claude(id, operation, (store, config))
+        Command::Claude(id, operation) => claude(id, operation, store, config)
             .await
             .map(Output::Metadata),
         Command::Reencrypt(target) => {
@@ -168,11 +173,11 @@ fn person_output(person: &llmproxy::storage::Person) -> Value {
 async fn claude(
     id: PersonId,
     operation: Claude,
-    context: (&Storage, &Config),
+    store: &Storage,
+    config: &Config,
 ) -> Result<Value, Box<dyn Error + Send + Sync>> {
-    let (store, config) = context;
     let secret = match operation {
-        Claude::Set(from_stdin) => Some(input::credential(from_stdin)?),
+        Claude::Set { from_stdin } => Some(input::credential(from_stdin)?),
         Claude::Remove | Claude::Status => None,
     };
     let mut tx = store.begin().await?;
@@ -188,7 +193,7 @@ async fn claude(
             Some(record) => (json!(record.state), Some(record.generation)),
             None => (json!("missing"), None),
         },
-        Claude::Set(_) => {
+        Claude::Set { .. } => {
             if !person.enabled {
                 return Err("person is disabled".into());
             }

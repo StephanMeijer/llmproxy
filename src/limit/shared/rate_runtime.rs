@@ -76,7 +76,8 @@ impl SharedRateStore {
         &self,
         key: &LimitKey,
         definition: &SharedDefinition,
-        reservation: (&Lease, Duration),
+        reservation: &Lease,
+        ttl: Duration,
     ) -> Result<(), StorageError> {
         let mut cached = self.defined(key);
         loop {
@@ -84,7 +85,7 @@ impl SharedRateStore {
             if !cached {
                 tx.put_limit(key, definition).await?;
             }
-            match tx.enqueue(key, reservation).await {
+            match tx.enqueue(key, reservation, ttl).await {
                 // The row vanished since it was cached: forget it and put it once more.
                 Err(StorageError::NotFound) if cached => {
                     self.set_defined(key, false);
@@ -180,10 +181,8 @@ impl AdmissionStore for SharedRateStore {
             self.enqueue(
                 &queued.key,
                 charge.definition,
-                (
-                    &queued.reservation,
-                    max_wait.saturating_sub(enqueue_started.elapsed()),
-                ),
+                &queued.reservation,
+                max_wait.saturating_sub(enqueue_started.elapsed()),
             )
             .await?;
             let mut listener = ChangeListener::new(self.storage.clone());
@@ -202,7 +201,7 @@ impl AdmissionStore for SharedRateStore {
                     && let Some(states) = tx.prepare_rates(&queued.key, charge).await?
                 {
                     let concurrency = match charge.definition.max_inflight() {
-                        Some(max) => tx.acquire_concurrency(&queued.key, (&fenced, max)).await?,
+                        Some(max) => tx.acquire_concurrency(&queued.key, &fenced, max).await?,
                         None => true,
                     };
                     if concurrency {
@@ -215,7 +214,8 @@ impl AdmissionStore for SharedRateStore {
                         let guard = charge.definition.max_inflight().map(|_| {
                             LeaseGuard::start(
                                 self.storage.clone(),
-                                (queued.key.clone(), fenced),
+                                queued.key.clone(),
+                                fenced,
                                 started,
                             )
                         });

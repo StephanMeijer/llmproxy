@@ -19,11 +19,7 @@ async fn earlier_lease_loss_cancels_later_limit_wait_before_upstream() {
     let reservation =
         llmproxy::storage::FencedLease::new(llmproxy::storage::OwnerId(uuid::Uuid::new_v4()));
     let mut tx = f.storage.begin().await.unwrap();
-    assert!(
-        tx.acquire_concurrency(&key, (&reservation, 1))
-            .await
-            .unwrap()
-    );
+    assert!(tx.acquire_concurrency(&key, &reservation, 1).await.unwrap());
     tx.commit().await.unwrap();
     let request = tokio::spawn(f.request(&a, false).send());
     f.state_count("fifo_waiters", 1).await;

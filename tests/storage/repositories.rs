@@ -117,13 +117,13 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     )
     .await
     .unwrap();
-    assert_eq!(tx.enqueue(&key, (&lease, LONG)).await.unwrap(), 1);
+    assert_eq!(tx.enqueue(&key, &lease, LONG).await.unwrap(), 1);
     let fenced = FencedLease {
         id: lease.id,
         owner: lease.owner,
         generation: 1,
     };
-    assert!(tx.acquire_concurrency(&key, (&fenced, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &fenced, 1).await.unwrap());
     tx.commit().await.unwrap();
     // When the complete authoritative state is locked and read.
     let mut tx = store.begin().await.unwrap();
@@ -159,13 +159,13 @@ async fn expired_leases_cannot_revive_and_reclaim_uses_database_time() {
     };
     let mut tx = store.begin().await.unwrap();
     tx.put_limit(&key, &definition()).await.unwrap();
-    tx.enqueue(&key, (&lease, Duration::ZERO)).await.unwrap();
+    tx.enqueue(&key, &lease, Duration::ZERO).await.unwrap();
     let fenced = FencedLease {
         id: lease.id,
         owner: lease.owner,
         generation: 1,
     };
-    assert!(tx.acquire_concurrency(&key, (&fenced, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &fenced, 1).await.unwrap());
     tx.commit().await.unwrap();
     sqlx::query("UPDATE concurrency_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1")
         .bind(lease.id).execute(&db.pool).await.unwrap();

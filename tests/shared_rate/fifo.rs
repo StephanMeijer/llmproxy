@@ -12,15 +12,15 @@ async fn successful_commit_order_serializes_enqueue_and_rollback_reuses_counter(
     let first = reservation();
     let second = reservation();
     let mut tx = f.first.begin().await.unwrap();
-    assert_eq!(tx.enqueue(&k, (&first, LONG)).await.unwrap(), 1);
+    assert_eq!(tx.enqueue(&k, &first, LONG).await.unwrap(), 1);
     let mut other = f.second.begin().await.unwrap();
-    let mut enqueue = Box::pin(other.enqueue(&k, (&second, LONG)));
+    let mut enqueue = Box::pin(other.enqueue(&k, &second, LONG));
     assert!(tokio::time::timeout(SHORT, &mut enqueue).await.is_err());
     tx.rollback().await.unwrap();
     assert_eq!(enqueue.await.unwrap(), 1);
     other.commit().await.unwrap();
     let mut tx = f.first.begin().await.unwrap();
-    assert_eq!(tx.enqueue(&k, (&first, LONG)).await.unwrap(), 2);
+    assert_eq!(tx.enqueue(&k, &first, LONG).await.unwrap(), 2);
     tx.commit().await.unwrap();
     let mut tx = f.first.begin().await.unwrap();
     assert_eq!(tx.waiter_head(&k).await.unwrap().unwrap().id, second.id);
@@ -86,7 +86,7 @@ async fn expired_head_is_reaped_before_live_waiter_admission() {
     let k = key(f.alice);
     let mut tx = f.first.begin().await.unwrap();
     tx.put_limit(&k, &d).await.unwrap();
-    tx.enqueue(&k, (&reservation(), std::time::Duration::ZERO))
+    tx.enqueue(&k, &reservation(), std::time::Duration::ZERO)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -115,7 +115,7 @@ async fn reaping_a_stale_waiter_commits_while_the_live_waiter_keeps_waiting() {
     f.waiters(1).await;
     // When an already expired waiter appears ahead of it.
     let mut tx = f.first.begin().await.unwrap();
-    tx.enqueue(&k, (&reservation(), std::time::Duration::ZERO))
+    tx.enqueue(&k, &reservation(), std::time::Duration::ZERO)
         .await
         .unwrap();
     tx.commit().await.unwrap();

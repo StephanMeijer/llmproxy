@@ -43,7 +43,7 @@ async fn concurrent_transactions_never_exceed_capacity() {
     let reserve = async |store: &Storage| {
         let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
         let mut tx = store.begin().await.unwrap();
-        let acquired = tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap();
+        let acquired = tx.acquire_concurrency(&key, &lease, 1).await.unwrap();
         tx.commit().await.unwrap();
         acquired
     };
@@ -63,7 +63,7 @@ async fn stale_generation_and_owner_cannot_mutate_replacement() {
     let (db, storage, key) = setup().await;
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let mut tx = storage.begin().await.unwrap();
-    assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
     sqlx::query("UPDATE concurrency_leases SET ownership_generation=2")
         .execute(&db.pool)
@@ -100,7 +100,7 @@ async fn database_expiry_controls_reclaim_and_new_lifetime() {
     let (db, storage, key) = setup().await;
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let mut tx = storage.begin().await.unwrap();
-    assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
     sqlx::query("UPDATE concurrency_leases SET expires_at=clock_timestamp()-interval '1 second'")
         .execute(&db.pool)
@@ -110,11 +110,7 @@ async fn database_expiry_controls_reclaim_and_new_lifetime() {
     let mut tx = storage.begin().await.unwrap();
     assert!(!tx.renew_concurrency(&key, &lease).await.unwrap());
     let replacement = FencedLease::new(OwnerId(Uuid::new_v4()));
-    assert!(
-        tx.acquire_concurrency(&key, (&replacement, 1))
-            .await
-            .unwrap()
-    );
+    assert!(tx.acquire_concurrency(&key, &replacement, 1).await.unwrap());
     tx.commit().await.unwrap();
     // Then the new lifetime is measured from PostgreSQL's clock, not a client timestamp.
     let seconds: f64 = sqlx::query_scalar("SELECT extract(epoch FROM (expires_at-clock_timestamp()))::float8 FROM concurrency_leases WHERE id=$1").bind(replacement.id).fetch_one(&db.pool).await.unwrap();
@@ -131,9 +127,9 @@ async fn completed_upstream_retains_lease_until_buffered_body_is_consumed() {
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let started = Instant::now();
     let mut tx = storage.begin().await.unwrap();
-    assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
-    let guard = LeaseGuard::start(storage.clone(), (key, lease), started);
+    let guard = LeaseGuard::start(storage.clone(), key, lease, started);
     let (produced, observed) = tokio::sync::oneshot::channel();
     let source = futures_util::stream::once(async move {
         produced.send(()).unwrap();
@@ -161,9 +157,9 @@ async fn old_confirmation_cancels_unpolled_upstream_and_discards_buffered_data()
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
     let started = Instant::now() - (LEASE_LIFETIME + Duration::from_secs(1));
     let mut tx = storage.begin().await.unwrap();
-    assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
+    assert!(tx.acquire_concurrency(&key, &lease, 1).await.unwrap());
     tx.commit().await.unwrap();
-    let guard = LeaseGuard::start(storage.clone(), (key, lease), started);
+    let guard = LeaseGuard::start(storage.clone(), key, lease, started);
     let mut cancellation = guard.cancellation();
     // When the downstream has not yet polled the response stream.
     let stream = admission(guard)
