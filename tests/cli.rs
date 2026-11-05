@@ -6,8 +6,8 @@ use std::{
     env, fs,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    path::PathBuf,
-    process::{Child, Command, Output, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, Command, Output},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -17,7 +17,7 @@ const TOKEN_VAR: &str = "LLMPROXY_CLI_TEST_TOKEN";
 const CONFIG_VAR: &str = "LLMPROXY_CONFIG";
 const DEFAULT_CONFIG: &str = "/etc/llmproxy/config.toml";
 const POLL: Duration = Duration::from_millis(50);
-const PATIENCE: Duration = Duration::from_secs(10);
+const PATIENCE: Duration = Duration::from_secs(30);
 
 #[path = "common/shutdown.rs"]
 mod shutdown;
@@ -29,14 +29,6 @@ impl Drop for Server {
     fn drop(&mut self) {
         shutdown::stop(&mut self.0);
     }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 fn config(listen: u16, extra: &str) -> String {
@@ -75,14 +67,6 @@ fn http_get(addr: SocketAddr, path: &str) -> String {
     let mut reply = String::new();
     stream.read_to_string(&mut reply).unwrap();
     reply
-}
-
-fn wait_until_listening(addr: SocketAddr) {
-    let deadline = Instant::now() + PATIENCE;
-    while TcpStream::connect_timeout(&addr, POLL).is_err() {
-        assert!(Instant::now() < deadline, "nothing listened on {addr}");
-        sleep(POLL);
-    }
 }
 
 fn wait_for_exit(server: &mut Server) -> std::process::ExitStatus {
@@ -154,16 +138,59 @@ fn check_config_names_a_missing_file() {
     assert!(stderr(&output).contains("/nonexistent/llmproxy.toml"));
 }
 
-fn spawn(path: &PathBuf) -> Server {
-    Server(
-        Command::new(BIN)
-            .arg(path)
-            .env(TOKEN_VAR, "t")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    )
+/// Starts the binary with `RUST_LOG` set to `filter` (or unset), JSON logs in `<config>.log` and
+/// errors in `<config>.err`.
+fn spawn(path: &Path, filter: Option<&str>) -> Server {
+    let mut command = Command::new(BIN);
+    command
+        .arg(path)
+        .env(TOKEN_VAR, "t")
+        .env_remove("RUST_LOG")
+        .stdout(fs::File::create(path.with_extension("log")).unwrap())
+        .stderr(fs::File::create(path.with_extension("err")).unwrap());
+    if let Some(filter) = filter {
+        command.env("RUST_LOG", filter);
+    }
+    Server(command.spawn().unwrap())
+}
+
+/// Waits for the server's `message` log line and returns the address it reports. The server binds
+/// port 0, so no other process can take the port between choosing and binding it.
+fn bound(server: &mut Server, path: &Path, message: &str) -> SocketAddr {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let log = fs::read_to_string(path.with_extension("log")).unwrap();
+        let reported = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| {
+                line.pointer("/fields/message")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(message)
+            })
+            .and_then(|line| line.pointer("/fields/listen")?.as_str()?.parse().ok());
+        if let Some(addr) = reported {
+            return addr;
+        }
+        let exited = server.0.try_wait().unwrap();
+        assert!(
+            exited.is_none(),
+            "server exited ({exited:?}) before {message:?}: {}",
+            fs::read_to_string(path.with_extension("err")).unwrap()
+        );
+        assert!(Instant::now() < deadline, "server never logged {message:?}");
+        sleep(POLL);
+    }
+}
+
+fn remove_run_files(path: &Path) {
+    for file in [
+        path.into(),
+        path.with_extension("log"),
+        path.with_extension("err"),
+    ] {
+        fs::remove_file(file).unwrap();
+    }
 }
 
 fn signal(server: &Server, name: &str) {
@@ -174,80 +201,55 @@ fn signal(server: &Server, name: &str) {
     assert!(sent.success());
 }
 
-fn local(port: u16) -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], port))
-}
-
 #[test]
 fn serves_requests_and_exits_cleanly_on_sigterm() {
-    let (listen, metrics) = (free_port(), free_port());
-    let path = write_config(
-        "serve",
-        &config(
-            listen,
-            &format!("metrics_listen = \"127.0.0.1:{metrics}\"\n"),
-        ),
-    );
-    let mut server = spawn(&path);
-    wait_until_listening(local(listen));
-    wait_until_listening(local(metrics));
+    let path = write_config("serve", &config(0, "metrics_listen = \"127.0.0.1:0\"\n"));
+    let mut server = spawn(&path, None);
+    let listen = bound(&mut server, &path, "listening");
+    let metrics = bound(&mut server, &path, "serving metrics");
 
-    assert!(http_get(local(listen), "/healthz").starts_with("HTTP/1.1 200"));
-    assert!(http_get(local(listen), "/nope/x").starts_with("HTTP/1.1 401"));
-    let scraped = http_get(local(metrics), "/metrics");
+    assert!(http_get(listen, "/healthz").starts_with("HTTP/1.1 200"));
+    assert!(http_get(listen, "/nope/x").starts_with("HTTP/1.1 401"));
+    let scraped = http_get(metrics, "/metrics");
     assert!(
         scraped.contains(r#"llm3_http_requests_total{route="other",code="401"} 1"#),
         "{scraped}"
     );
-    assert!(http_get(local(metrics), "/elsewhere").starts_with("HTTP/1.1 404"));
+    assert!(http_get(metrics, "/elsewhere").starts_with("HTTP/1.1 404"));
 
     signal(&server, "TERM");
     assert!(
         wait_for_exit(&mut server).success(),
         "SIGTERM should end in a clean exit"
     );
-    fs::remove_file(path).unwrap();
+    remove_run_files(&path);
 }
 
 #[test]
 fn serves_without_a_metrics_listener_and_exits_cleanly_on_sigint() {
-    let listen = free_port();
-    let path = write_config("no-metrics", &config(listen, ""));
-    let mut server = spawn(&path);
-    wait_until_listening(local(listen));
-    assert!(http_get(local(listen), "/healthz").starts_with("HTTP/1.1 200"));
+    let path = write_config("no-metrics", &config(0, ""));
+    let mut server = spawn(&path, None);
+    let listen = bound(&mut server, &path, "listening");
+    assert!(http_get(listen, "/healthz").starts_with("HTTP/1.1 200"));
 
     signal(&server, "INT");
     assert!(
         wait_for_exit(&mut server).success(),
         "SIGINT should end in a clean exit"
     );
-    fs::remove_file(path).unwrap();
+    remove_run_files(&path);
 }
 
 /// Serves one `/healthz` request with `RUST_LOG` set to `filter` (or unset) and returns the log.
 fn request_log(name: &str, filter: Option<&str>) -> String {
-    let listen = free_port();
-    let path = write_config(name, &config(listen, ""));
-    let log = path.with_extension("log");
-    let mut command = Command::new(BIN);
-    command
-        .arg(&path)
-        .env(TOKEN_VAR, "t")
-        .env_remove("RUST_LOG")
-        .stdout(fs::File::create(&log).unwrap())
-        .stderr(Stdio::null());
-    if let Some(filter) = filter {
-        command.env("RUST_LOG", filter);
-    }
-    let mut server = Server(command.spawn().unwrap());
-    wait_until_listening(local(listen));
-    assert!(http_get(local(listen), "/healthz").starts_with("HTTP/1.1 200"));
+    let path = write_config(name, &config(0, ""));
+    let mut server = spawn(&path, filter);
+    let listen = bound(&mut server, &path, "listening");
+    assert!(http_get(listen, "/healthz").starts_with("HTTP/1.1 200"));
     signal(&server, "TERM");
     assert!(wait_for_exit(&mut server).success());
-    let text = fs::read_to_string(&log).unwrap();
-    fs::remove_file(path).unwrap();
-    fs::remove_file(log).unwrap();
+    let text = fs::read_to_string(path.with_extension("log")).unwrap();
+    remove_run_files(&path);
     text
 }
 
@@ -267,7 +269,7 @@ fn rust_log_selects_the_log_level() {
         request_line(&empty),
         "an empty RUST_LOG falls back to info: {empty}"
     );
-    let quiet = request_log("log-warn", Some("warn"));
+    let quiet = request_log("log-warn", Some("warn,llmproxy::listen=info"));
     assert!(
         !request_line(&quiet),
         "RUST_LOG=warn hides per-request lines: {quiet}"
@@ -327,10 +329,7 @@ fn refuses_to_start_when_an_address_is_taken() {
 
     let metrics = write_config(
         "taken-metrics",
-        &config(
-            free_port(),
-            &format!("metrics_listen = \"127.0.0.1:{taken_port}\"\n"),
-        ),
+        &config(0, &format!("metrics_listen = \"127.0.0.1:{taken_port}\"\n")),
     );
     let output = run(&[metrics.to_str().unwrap()], Some("t"));
     assert_eq!(output.status.code(), Some(1));

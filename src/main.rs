@@ -10,6 +10,8 @@ use tokio::{net::TcpListener, signal};
 const CONFIG_ENV: &str = "LLMPROXY_CONFIG";
 const DEFAULT_CONFIG: &str = "/etc/llmproxy/config.toml";
 const CHECK_FLAG: &str = "--check-config";
+/// Startup address lines get their own target so `RUST_LOG=warn,llmproxy::listen=info` keeps them.
+const LISTEN_TARGET: &str = "llmproxy::listen";
 
 mod help;
 mod operator;
@@ -72,14 +74,15 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|e| format!("bind {listen}: {e}"))?;
-    tracing::info!(%listen, "listening");
+    // The bound address, not the configured one, so port 0 reports the port actually chosen.
+    tracing::info!(target: LISTEN_TARGET, listen = %listener.local_addr()?, "listening");
     let clients = axum::serve(listener, router(proxy.clone())).with_graceful_shutdown(shutdown());
     match metrics_listen {
         Some(addr) => {
             let listener = TcpListener::bind(addr)
                 .await
                 .map_err(|e| format!("bind {addr}: {e}"))?;
-            tracing::info!(listen = %addr, "serving metrics");
+            tracing::info!(target: LISTEN_TARGET, listen = %listener.local_addr()?, "serving metrics");
             let metrics =
                 axum::serve(listener, metrics_router(proxy)).with_graceful_shutdown(shutdown());
             tokio::try_join!(clients.into_future(), metrics.into_future())?;
