@@ -2,8 +2,10 @@
 
 #[path = "auth/binary.rs"]
 mod binary;
-#[path = "migrations/support.rs"]
+#[path = "common/database.rs"]
 mod database;
+#[path = "common/database_close.rs"]
+mod database_close;
 #[path = "auth/http.rs"]
 mod http;
 #[path = "auth/support.rs"]

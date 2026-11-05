@@ -4,7 +4,7 @@
 mod acknowledgement;
 #[path = "postgres_integration/admission.rs"]
 mod admission;
-#[path = "postgres_integration/database.rs"]
+#[path = "common/database.rs"]
 mod database;
 #[path = "common/evidence.rs"]
 mod evidence;

@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[path = "migrations/support.rs"]
+#[path = "common/database.rs"]
 mod database;
+#[path = "common/database_close.rs"]
+mod database_close;
 #[path = "shared_concurrency/edges.rs"]
 mod edges;
 #[path = "shared_concurrency/migration.rs"]

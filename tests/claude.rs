@@ -4,8 +4,10 @@
 mod cancellation;
 #[path = "claude/conflict_metrics.rs"]
 mod conflict_metrics;
-#[path = "migrations/support.rs"]
+#[path = "common/database.rs"]
 mod database;
+#[path = "common/database_close.rs"]
+mod database_close;
 #[path = "claude/edges.rs"]
 mod edges;
 #[path = "claude/heartbeat_metrics.rs"]

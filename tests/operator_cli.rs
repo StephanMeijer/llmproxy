@@ -2,8 +2,10 @@
 
 #[path = "operator_cli/concurrency.rs"]
 mod concurrency;
-#[path = "migrations/support.rs"]
+#[path = "common/database.rs"]
 mod database;
+#[path = "common/database_close.rs"]
+mod database_close;
 #[path = "operator_cli/edges.rs"]
 mod edges;
 #[path = "common/evidence.rs"]

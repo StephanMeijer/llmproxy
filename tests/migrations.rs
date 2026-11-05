@@ -5,11 +5,13 @@ use sqlx::AssertSqlSafe;
 use std::{fs, process::Command, time::Duration};
 use uuid::Uuid;
 
+#[path = "common/database.rs"]
+mod database;
+#[path = "common/database_close.rs"]
+mod database_close;
 #[path = "migrations/fixed_point.rs"]
 mod fixed_point;
-#[path = "migrations/support.rs"]
-mod support;
-use support::Database;
+use database::Database;
 
 const BIN: &str = env!("CARGO_BIN_EXE_llmproxy");
 
