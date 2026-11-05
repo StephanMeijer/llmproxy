@@ -248,6 +248,7 @@ CI ([`ci.yml`](.github/workflows/ci.yml)) runs these on every pull request and e
 ```sh
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo audit --deny warnings
 export LLMPROXY_TEST_DATABASE_URL='postgres://postgres:local-test-only@127.0.0.1:5432/postgres'
 export LLMPROXY_CREDENTIAL_CONTAINER='<owned-postgres-container-id>'
 export RUST_TEST_THREADS=2   # bound concurrent test pools against a small test database
@@ -257,6 +258,7 @@ CARGO_TARGET_DIR=target/cov cargo llvm-cov --locked --fail-under-lines 99
 
 - **Strict clippy.** `pedantic` and `nursery` are denied, as are `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro` and `indexing_slicing` (see `[lints.clippy]` in `Cargo.toml`).
 - **Coverage.** Line coverage must stay at or above 99%. Tests live in `tests/`, which coverage ignores, so the number measures production code only. It needs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install cargo-llvm-cov --locked`) and the `llvm-tools` component, which `rustup toolchain install` in this directory adds.
+- **Advisories.** `cargo audit --deny warnings` fails on any RustSec advisory in `Cargo.lock`, including unmaintained and yanked crates. Install it with `cargo install cargo-audit --locked`.
 - **Toolchain.** Pinned in `rust-toolchain.toml`. Bump it on purpose: a new Rust release can add lints.
 - **Real database tests.** `LLMPROXY_TEST_DATABASE_URL` is mandatory for database tests and coverage, pointing at an isolated PostgreSQL 18 instance with CREATEDB and administrative fault-injection privileges. Tests create/drop isolated databases and use fake local upstreams, with no provider credentials. Docker must be available: `postgres_integration` owns an additional PostgreSQL 18 container for real stop/start crash tests. CLI tests run the built binary (Unix only). CI checks readiness and explicitly migrates before tests.
 
