@@ -134,7 +134,7 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     assert_eq!(state.waiters.first().unwrap().enqueue_order, 1);
     assert_eq!(state.leases.first().unwrap().owner, lease.owner);
     assert!(tx.renew_concurrency(&key, &fenced).await.unwrap());
-    tx.release(&key, &lease).await.unwrap();
+    tx.remove_waiter(&key, &lease).await.unwrap();
     assert!(tx.release_concurrency(&key, &fenced).await.unwrap());
     tx.commit().await.unwrap();
     let mut tx = store.begin().await.unwrap();

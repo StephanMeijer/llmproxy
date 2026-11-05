@@ -1,5 +1,5 @@
 use super::*;
-use llmproxy::storage::{ChangeListener, StorageError};
+use llmproxy::storage::StorageError;
 
 #[test]
 fn only_database_failures_count_as_outages() {
@@ -44,7 +44,7 @@ async fn wake_and_timeout_reload_committed_rows_across_pools() {
     // Given a subscriber with an initial authoritative reload.
     let (db, writer, person) = setup().await;
     let reader = Storage::new(&db.config).unwrap();
-    let mut listener = ChangeListener::new(reader.clone());
+    let mut listener = CredentialReader::new(reader.clone());
     assert!(listener.credential(person, LONG).await.unwrap().is_none());
     // When an uncommitted credential triggers a transactional NOTIFY.
     let mut tx = writer.begin().await.unwrap();
@@ -75,7 +75,7 @@ async fn missed_notification_is_recovered_by_timeout_reread() {
     // Given a listener and a credential changed without trigger notifications.
     let (db, writer, person) = setup().await;
     let reader = Storage::new(&db.config).unwrap();
-    let mut listener = ChangeListener::new(reader.clone());
+    let mut listener = CredentialReader::new(reader.clone());
     assert!(listener.credential(person, LONG).await.unwrap().is_none());
     let mut tx = db.pool.begin().await.unwrap();
     sqlx::query("SET LOCAL session_replication_role = replica")
@@ -143,7 +143,7 @@ async fn listener_reconnect_gap_forces_authoritative_reload() {
     // Given a connected subscriber.
     let (db, writer, person) = setup().await;
     let reader = Storage::new(&db.config).unwrap();
-    let mut listener = ChangeListener::new(reader.clone());
+    let mut listener = CredentialReader::new(reader.clone());
     assert!(listener.credential(person, LONG).await.unwrap().is_none());
     // When its idle LISTEN backend is terminated and a mutation happens in the gap.
     sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND query LIKE 'LISTEN%'")

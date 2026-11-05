@@ -53,6 +53,33 @@ fn credential(person: PersonId) -> CredentialRecord {
     }
 }
 
+/// Waits for a change hint, then rereads the credential in a fresh transaction.
+struct CredentialReader {
+    listener: ChangeListener,
+    storage: Storage,
+}
+
+impl CredentialReader {
+    fn new(storage: Storage) -> Self {
+        Self {
+            listener: ChangeListener::new(storage.clone()),
+            storage,
+        }
+    }
+
+    async fn credential(
+        &mut self,
+        person: PersonId,
+        wait: Duration,
+    ) -> Result<Option<CredentialRecord>, StorageError> {
+        self.listener.changed(wait).await?;
+        let mut tx = self.storage.begin().await?;
+        let result = tx.credential(person).await?;
+        tx.rollback().await?;
+        Ok(result)
+    }
+}
+
 fn definition() -> SharedDefinition {
     let config = Config::parse("listen='127.0.0.1:0'\nproxy_token='t'\n[[limit]]\nname='budget'\nprefixes=['/claude/']\nrpm=10\n", |_| None).unwrap();
     CompiledLimits::new(&config.limits, "test")

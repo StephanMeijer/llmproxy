@@ -14,7 +14,7 @@ pub struct RotationCounts {
 impl Storage {
     /// Rewrites one current row per transaction. Restarting skips committed rows.
     /// Load the old and new keys on every replica before rotating; switch writers to
-    /// the target key before removing old files. A zero reference count is required.
+    /// the target key before removing old files.
     /// # Errors
     /// Wrong/missing keys return `Encryption`; the failing row remains untouched.
     pub async fn reencrypt_credentials(
@@ -58,22 +58,5 @@ impl Storage {
             tx.commit().await?;
             counts.rewritten = counts.rewritten.saturating_add(1);
         }
-    }
-
-    /// Checks whether an old key still backs any current row, including invalid rows.
-    /// Only retire a key after this returns zero and all writers use the new key.
-    /// # Errors
-    /// Returns a sanitized schema or database availability error.
-    pub async fn credential_key_references(&self, key_id: &str) -> Result<i64, StorageError> {
-        let mut tx = self.begin().await?;
-        let count = sqlx::query_scalar(
-            "SELECT count(*) FROM provider_credentials WHERE namespace=$1 AND key_id=$2",
-        )
-        .bind(&self.namespace)
-        .bind(key_id)
-        .fetch_one(&mut *tx.tx)
-        .await?;
-        tx.rollback().await?;
-        Ok(count)
     }
 }

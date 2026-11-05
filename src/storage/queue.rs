@@ -72,13 +72,6 @@ impl StorageTransaction {
             .fetch_one(&mut *self.tx).await?)
     }
 
-    /// Removes only a waiter owned by the caller; leases require fenced release.
-    /// # Errors
-    /// Returns a sanitized database error.
-    pub async fn release(&mut self, key: &LimitKey, lease: &Lease) -> Result<(), StorageError> {
-        self.remove_waiter(key, lease).await
-    }
-
     /// Reclaims expired records according to `PostgreSQL` time under the limit lock.
     /// # Errors
     /// Returns a sanitized database error.

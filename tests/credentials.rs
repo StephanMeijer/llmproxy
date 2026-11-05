@@ -54,6 +54,14 @@ async fn setup() -> (database::Database, Storage, PersonId, PersonId) {
     (db, store, alice, bob)
 }
 
+async fn key_references(db: &database::Database, key_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM provider_credentials WHERE key_id = $1")
+        .bind(key_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
 fn encryption(db: &database::Database) -> CredentialEncryptionConfig {
     let old = db.path.with_extension("old.key");
     let new = db.path.with_extension("new.key");

@@ -61,7 +61,7 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
             .unwrap();
     assert_eq!(state.0, "invalid");
     assert_eq!(state.1, before.2);
-    assert_eq!(store.credential_key_references("old").await.unwrap(), 0);
+    assert_eq!(key_references(&db, "old").await, 0);
     artifact("rotation-failure.txt", b"PASS: missing/wrong old key returns Unavailable without generation/ciphertext/fingerprint changes; corrected key rotates invalid row while preserving state/fingerprint\n");
     for path in config.keys.values() {
         fs::remove_file(path).unwrap();
