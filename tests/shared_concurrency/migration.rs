@@ -16,7 +16,7 @@ async fn upgrade_preserves_live_lease_with_fenced_initial_generation() {
         .await
         .unwrap();
     sqlx::query("INSERT INTO limit_definitions(namespace,person_id,provider,name,config) VALUES ('test',$1,'anthropic','limit','{}')").bind(person).execute(&db.pool).await.unwrap();
-    sqlx::query("INSERT INTO concurrency_leases(namespace,person_id,provider,limit_name,id,owner,expires_at) VALUES ('test',$1,'anthropic','limit',$2,$2,clock_timestamp()+interval '30 seconds')").bind(person).bind(lease).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO concurrency_leases(namespace,person_id,provider,limit_name,id,owner,expires_at) VALUES ('test',$1,'anthropic','limit',$2,$2,clock_timestamp()+interval '1 second'*$3)").bind(person).bind(lease).bind(LEASE_LIFETIME.as_secs_f64()).execute(&db.pool).await.unwrap();
     // When the additive ownership-generation migration runs.
     sqlx::raw_sql(include_str!(
         "../../migrations/3_concurrency_lease_generation.sql"

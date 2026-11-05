@@ -118,7 +118,8 @@ async fn database_expiry_controls_reclaim_and_new_lifetime() {
     tx.commit().await.unwrap();
     // Then the new lifetime is measured from PostgreSQL's clock, not a client timestamp.
     let seconds: f64 = sqlx::query_scalar("SELECT extract(epoch FROM (expires_at-clock_timestamp()))::float8 FROM concurrency_leases WHERE id=$1").bind(replacement.id).fetch_one(&db.pool).await.unwrap();
-    assert!(seconds > 28.0 && seconds <= 30.0);
+    let lifetime = LEASE_LIFETIME.as_secs_f64();
+    assert!(seconds > lifetime - 2.0 && seconds <= lifetime);
     storage.close().await;
     db.close().await;
 }
@@ -158,7 +159,7 @@ async fn old_confirmation_cancels_unpolled_upstream_and_discards_buffered_data()
     // Given a controller whose conservative confirmation window already elapsed.
     let (db, storage, key) = setup().await;
     let lease = FencedLease::new(OwnerId(Uuid::new_v4()));
-    let started = Instant::now() - Duration::from_secs(31);
+    let started = Instant::now() - (LEASE_LIFETIME + Duration::from_secs(1));
     let mut tx = storage.begin().await.unwrap();
     assert!(tx.acquire_concurrency(&key, (&lease, 1)).await.unwrap());
     tx.commit().await.unwrap();
