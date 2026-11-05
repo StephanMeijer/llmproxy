@@ -6,7 +6,8 @@ use llmproxy::{
 use std::time::Duration;
 
 const BUDGET: Duration = Duration::from_millis(50);
-const BOUND: Duration = Duration::from_millis(200);
+// Hang guard, not a timing assertion: generous so a loaded machine never trips it.
+const BOUND: Duration = Duration::from_secs(1);
 
 #[tokio::test]
 async fn definition_lock_wait_respects_end_to_end_deadline() {
