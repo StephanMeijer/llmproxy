@@ -77,6 +77,20 @@ async fn secret_rejects_malformed_or_unbounded_hash_parameters() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_waiting_hasher_verifies_after_the_only_worker_frees_up() -> TestResult {
+    // Given one worker slot and a stored hash.
+    let hasher = TokenHasher::new(NonZeroUsize::MIN).waiting(Duration::from_mins(1));
+    let token = ProxyToken::generate()?;
+    let wrong = ProxyToken::generate()?;
+    let hash = hasher.hash(&token).await?;
+    // When a right and a wrong token verify at once, so one waits for the other's slot.
+    let (right, wrong) = tokio::join!(hasher.verify(&token, &hash), hasher.verify(&wrong, &hash));
+    // Then both get a real answer instead of Busy.
+    assert_eq!((right, wrong), (Ok(true), Ok(false)));
+    Ok(())
+}
+
 #[test]
 fn a_waiting_hasher_gives_up_after_its_wait() -> TestResult {
     // Given one worker slot held by a hash that cannot start (the only blocking thread is busy).
