@@ -18,6 +18,7 @@ pub struct Fixture {
     pub tokens: Vec<String>,
     pub order: Vec<String>,
     scenario: &'static str,
+    closed: bool,
 }
 
 impl Fixture {
@@ -40,6 +41,7 @@ impl Fixture {
             tokens: Vec::new(),
             order: Vec::new(),
             scenario,
+            closed: false,
         };
         fs::write(&fixture.config, fixture.config_text("127.0.0.1:0", "")).unwrap();
         let migration = process::cli(&fixture.config, &["db", "migrate"], None);
@@ -173,13 +175,10 @@ impl Fixture {
         )
         .unwrap();
     }
-}
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            return;
-        }
+    /// Stops the replicas, then fails the test if any process log contains a secret.
+    pub fn close(mut self, replicas: Vec<Replica>) {
+        drop(replicas);
         for entry in fs::read_dir(&self.db.directory).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|e| e == "log") {
@@ -192,5 +191,16 @@ impl Drop for Fixture {
                 }
             }
         }
+        self.closed = true;
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // Skip while unwinding so a failing test reports its own panic, not this one.
+        assert!(
+            self.closed || std::thread::panicking(),
+            "Fixture dropped without close(): process logs were not scanned for secrets"
+        );
     }
 }
