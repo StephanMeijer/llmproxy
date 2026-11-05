@@ -1,11 +1,12 @@
 use super::database;
 #[path = "../common/evidence.rs"]
 mod evidence;
+#[path = "../common/healthy.rs"]
+mod healthy;
 #[path = "../common/fake_provider.rs"]
 mod provider;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
-use axum::http::StatusCode;
 pub use evidence::artifact;
 use llmproxy::{
     secret::{KeyRing, ProxyToken, SecretBytes, TokenHasher},
@@ -131,29 +132,14 @@ impl Fixture {
             .stderr(output)
             .spawn()
             .unwrap();
-        let binary = Binary {
+        let mut binary = Binary {
             base: format!("http://{addr}"),
             metrics: format!("http://{metrics_addr}/metrics"),
             child,
             config: path,
             log,
         };
-        tokio::time::timeout(WAIT, async {
-            let client = reqwest::Client::new();
-            loop {
-                if client
-                    .get(format!("{}/healthz", binary.base))
-                    .send()
-                    .await
-                    .is_ok_and(|r| r.status() == StatusCode::OK)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        healthy::wait_healthy(&binary.base, &mut binary.child, WAIT).await;
         binary
     }
 
