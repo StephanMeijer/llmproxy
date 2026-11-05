@@ -60,7 +60,15 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
-    tracing_subscriber::fmt().json().init();
+    // RUST_LOG picks the level (e.g. "warn" or "info,llmproxy=debug"); unset, empty or invalid means info.
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .try_from_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .init();
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|e| format!("bind {listen}: {e}"))?;

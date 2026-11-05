@@ -22,7 +22,7 @@ serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
 toml = "1.1.8"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["json"] }
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.0", features = ["test-util"] }

@@ -208,6 +208,8 @@ Exercise outages before rollout: with PostgreSQL stopped, legacy static requests
 
 Logs are JSON on stdout at `INFO`, one line per request: route, status, method, path, milliseconds. Bodies, header values and query strings are never logged.
 
+`RUST_LOG` changes the level, for example `RUST_LOG=warn` to drop the per-request lines or `RUST_LOG=info,llmproxy=debug` for more detail from the proxy alone. Unset, empty or invalid means `info`. Below `info`, dependencies such as `sqlx` and `hyper` add their own debug output, and the promise above holds only at `info` and higher.
+
 When `metrics_listen` is set, `GET /metrics` serves:
 
 ```
