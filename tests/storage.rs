@@ -175,6 +175,7 @@ async fn repositories_reject_invalid_state_changes_and_report_conflicts() {
         StorageError::IncompatibleSchema,
         StorageError::UnsupportedServer,
         StorageError::MigrationFailed,
+        StorageError::MigrationLocked,
         StorageError::Conflict,
         StorageError::InvalidData,
         StorageError::NotFound,
@@ -183,7 +184,7 @@ async fn repositories_reject_invalid_state_changes_and_report_conflicts() {
     .iter()
     .map(ToString::to_string)
     .collect();
-    assert_eq!(messages.len(), 8);
+    assert_eq!(messages.len(), 9);
     store.close().await;
     db.close().await;
 }

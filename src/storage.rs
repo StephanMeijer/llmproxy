@@ -37,6 +37,8 @@ pub enum StorageError {
     IncompatibleSchema,
     UnsupportedServer,
     MigrationFailed,
+    /// Another session held the migration lock for longer than `acquire_timeout`.
+    MigrationLocked,
     Conflict,
     InvalidData,
     NotFound,
@@ -54,6 +56,7 @@ impl StorageError {
                 | Self::IncompatibleSchema
                 | Self::UnsupportedServer
                 | Self::MigrationFailed
+                | Self::MigrationLocked
         )
     }
 }
@@ -68,6 +71,9 @@ impl fmt::Display for StorageError {
             Self::UnsupportedServer => "PostgreSQL 16 or newer is required",
             Self::MigrationFailed => {
                 "PostgreSQL migration failed; check schema ownership and migration privileges"
+            }
+            Self::MigrationLocked => {
+                "PostgreSQL migration lock held by another session; wait for it to finish or end that session"
             }
             Self::Conflict => "database mutation conflicts with current state",
             Self::InvalidData => "invalid database record",
@@ -101,7 +107,8 @@ impl From<sqlx::Error> for StorageError {
 /// No connection is returned to a pool with a session lock still held, including on cancellation.
 ///
 /// # Errors
-/// Returns a sanitized connectivity, server-version, or migration failure.
+/// Returns a sanitized connectivity, server-version, or migration failure, or
+/// [`StorageError::MigrationLocked`] when another migrator holds the lock past `acquire_timeout`.
 pub async fn migrate(config: &PostgresConfig) -> Result<(), StorageError> {
     let options = PgConnectOptions::from_str(&config.url)
         .map_err(|_| StorageError::Unavailable)?
@@ -111,8 +118,23 @@ pub async fn migrate(config: &PostgresConfig) -> Result<(), StorageError> {
         .map_err(|_| StorageError::Unavailable)?
         .map_err(|_| StorageError::Unavailable)?;
     check_server(&mut connection).await?;
+    // Bound only the wait for another migrator; the migrations themselves keep the default.
+    sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+        .bind(format!("{}ms", config.acquire_timeout.as_millis()))
+        .execute(&mut connection)
+        .await
+        .map_err(|_| StorageError::MigrationFailed)?;
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(MIGRATION_LOCK)
+        .execute(&mut connection)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::Database(error) if error.code().as_deref() == Some("55P03") => {
+                StorageError::MigrationLocked
+            }
+            _ => StorageError::MigrationFailed,
+        })?;
+    sqlx::query("RESET lock_timeout")
         .execute(&mut connection)
         .await
         .map_err(|_| StorageError::MigrationFailed)?;
