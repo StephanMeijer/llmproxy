@@ -68,7 +68,10 @@ impl Replica {
 impl Drop for Replica {
     fn drop(&mut self) {
         shutdown::stop(&mut self.child);
-        fs::remove_dir_all(&self.directory).unwrap();
+        let removed = fs::remove_dir_all(&self.directory);
+        if !std::thread::panicking() {
+            removed.unwrap();
+        }
     }
 }
 
