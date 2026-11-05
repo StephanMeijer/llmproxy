@@ -499,7 +499,8 @@ impl Proxy {
         match self.send_upstream(route, &outgoing, deadline).await {
             Ok((upstream, retries)) => relay(route, upstream, queue_wait_ms, retries, permits),
             Err(e) => {
-                tracing::warn!(route = route.name, error = %e, "upstream request failed");
+                // Debug keeps the source chain (refused, DNS); without_url drops the client's query string.
+                tracing::warn!(route = route.name, error = ?e.without_url(), "upstream request failed");
                 error(
                     StatusCode::BAD_GATEWAY,
                     "upstream_error",
