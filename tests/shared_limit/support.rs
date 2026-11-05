@@ -21,7 +21,8 @@ pub struct Lease(Arc<Mutex<State>>);
 impl Drop for Lease {
     fn drop(&mut self) {
         let state = self.0.lock();
-        if !std::thread::panicking() {
+        // Always release a healthy lease; skip only the poison panic while unwinding.
+        if state.is_ok() || !std::thread::panicking() {
             state.unwrap().leases -= 1;
         }
     }
