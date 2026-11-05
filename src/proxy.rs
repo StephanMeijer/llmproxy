@@ -537,7 +537,10 @@ impl Proxy {
             let wait = retry_after(response.headers())
                 .unwrap_or(backoff)
                 .max(MIN_RETRY_WAIT);
-            if Instant::now() + wait >= deadline {
+            if Instant::now()
+                .checked_add(wait)
+                .is_none_or(|resume| resume >= deadline)
+            {
                 // Waiting would outlast the budget: pass this 429 on now, with the provider's own headers.
                 return Ok((response, retries));
             }
