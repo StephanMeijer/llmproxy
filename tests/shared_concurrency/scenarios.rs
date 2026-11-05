@@ -4,10 +4,6 @@ use tokio::time::Instant;
 
 #[tokio::test]
 async fn two_process_stream_lifecycle() {
-    if std::env::var_os("LEASE_CHILD_URL").is_some() {
-        process::child().await;
-        return;
-    }
     // Given two real processes sharing a single PostgreSQL concurrency slot.
     let (db, storage, key) = setup().await;
     let a = Replica::start(&db.config.url, key.person).await;
