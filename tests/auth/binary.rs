@@ -41,7 +41,7 @@ pub async fn binary_scenario() {
         .build()
         .unwrap();
     let base = format!("http://{listen}");
-    healthy::wait_healthy(&base, &mut child, Duration::from_secs(5)).await;
+    healthy::wait_healthy(&base, &mut child, crate::WAIT).await;
     check_authenticated_paths(&client, &fixture, &base).await;
     postgres_available(&client, &metrics, true).await;
     fixture.storage.close().await;
