@@ -4,7 +4,7 @@ use crate::limit::shared::SharedDefinition;
 #[path = "rate.rs"]
 mod rate;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LimitKey {
     pub person: PersonId,
     pub name: String,
