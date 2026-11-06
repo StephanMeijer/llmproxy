@@ -67,7 +67,7 @@ fn exposes_metadata_without_inventing_unobserved_counts() {
 fn snapshots_replace_counts_and_include_unavailable_credentials() {
     // Given a previous larger snapshot.
     let metrics = Metrics::default();
-    let credentials = metrics.credentials();
+    let credentials = metrics.storage();
     credentials.set_credentials(
         PROVIDER,
         CredentialCounts {
@@ -129,7 +129,7 @@ fn operation_labels_remain_bounded_and_counters_accumulate() {
         for (outcome, _) in outcomes {
             for _ in 0..2 {
                 metrics
-                    .credentials()
+                    .storage()
                     .record_operation(PROVIDER, operation, outcome);
             }
         }
@@ -179,7 +179,7 @@ async fn scrapes_lifecycle_outage_recovery_without_identity_or_secret_leaks() {
         .unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.text().await.unwrap(), "ok");
-    let credentials = proxy.metrics().credentials();
+    let credentials = proxy.metrics().storage();
     credentials.set_postgres_available(true);
     // When authoritative lifecycle snapshots and database observations change.
     for (phase, counts, operation, available) in [
