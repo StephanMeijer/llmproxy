@@ -1,8 +1,8 @@
 use std::{env, error::Error, io::Write, num::NonZeroUsize, path::PathBuf};
 
 use llmproxy::{
-    config::Config,
-    secret::{KeyRing, ProxyToken, TokenHasher},
+    config::{Config, CredentialEncryptionConfig},
+    secret::{ProxyToken, TokenHasher},
     storage::{
         CredentialState, CredentialVersion, Credentials, Person, PersonId, Storage, TokenId,
     },
@@ -153,16 +153,25 @@ async fn execute(
             .await
             .map(Output::Metadata),
         Command::Reencrypt(target) => {
-            let encryption = config
-                .credential_encryption
-                .as_ref()
-                .ok_or("credential encryption unavailable")?;
-            let counts = store.reencrypt_credentials(encryption, target).await?;
+            let encryption = CredentialEncryptionConfig {
+                active_key_id: target.to_owned(),
+                ..encryption(config)?.clone()
+            };
+            let counts = Credentials::open(store.clone(), &encryption)?
+                .reencrypt()
+                .await?;
             Ok(Output::Metadata(
                 json!({"rewritten": counts.rewritten, "remaining": counts.remaining}),
             ))
         }
     }
+}
+
+fn encryption(config: &Config) -> Result<&CredentialEncryptionConfig, &'static str> {
+    config
+        .credential_encryption
+        .as_ref()
+        .ok_or("credential encryption unavailable")
 }
 
 fn person_output(person: &llmproxy::storage::Person) -> Value {
@@ -193,16 +202,7 @@ async fn claude(
             None => (json!("missing"), None),
         },
         Claude::Set { .. } => {
-            if !person.enabled {
-                return Err("person is disabled".into());
-            }
-            let encryption = config
-                .credential_encryption
-                .as_ref()
-                .ok_or("credential encryption unavailable")?;
-            let keys = KeyRing::load(&encryption.active_key_id, &encryption.keys)?;
-            let fingerprint = input::fingerprint(&encryption.fingerprint_key_file)?;
-            let credentials = Credentials::new(store.clone(), keys, fingerprint);
+            let credentials = Credentials::open(store.clone(), encryption(config)?)?;
             let secret = secret.as_ref().ok_or("credential input unavailable")?;
             let version = match version {
                 Some(version) => credentials.replace(version, secret).await?,
@@ -211,12 +211,10 @@ async fn claude(
             (json!(CredentialState::Active), Some(version.generation))
         }
         Claude::Remove => {
-            let mut record = record.ok_or("credential not found")?;
-            record.state = CredentialState::Removed;
-            let mut tx = store.begin().await?;
-            let generation = tx.set_credential_state(&record).await?;
-            tx.commit().await?;
-            (json!(CredentialState::Removed), Some(generation))
+            let version = version.ok_or("credential not found")?;
+            let credentials = Credentials::open(store.clone(), encryption(config)?)?;
+            let removed = credentials.remove(version).await?;
+            (json!(CredentialState::Removed), Some(removed.generation))
         }
     };
     Ok(

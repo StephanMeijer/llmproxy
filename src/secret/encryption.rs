@@ -77,6 +77,12 @@ impl KeyRing {
         Self::new(active, keys)
     }
 
+    /// The key ID new envelopes are written under.
+    #[must_use]
+    pub fn active(&self) -> &str {
+        &self.active
+    }
+
     /// Encrypts using the active key and a fresh random 96-bit nonce.
     /// # Errors
     /// Returns redacted randomness, key, or authentication errors.
