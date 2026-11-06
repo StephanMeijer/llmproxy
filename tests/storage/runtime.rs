@@ -18,6 +18,26 @@ fn only_database_failures_count_as_outages() {
 }
 
 #[tokio::test]
+async fn acquire_timeout_above_postgres_int_max_still_connects() {
+    // Given an acquire_timeout one millisecond past PostgreSQL's int limit for lock_timeout.
+    let (db, store, _) = setup().await;
+    let config = llmproxy::config::PostgresConfig {
+        url: db.config.url.clone(),
+        namespace: db.config.namespace.clone(),
+        max_connections: 1,
+        connect_timeout: db.config.connect_timeout,
+        acquire_timeout: Duration::from_millis(i32::MAX as u64 + 1),
+    };
+    // When the runtime pool opens a session.
+    let wide = Storage::new(&config).unwrap();
+    // Then PostgreSQL accepts the clamped session settings.
+    wide.begin().await.unwrap().rollback().await.unwrap();
+    wide.close().await;
+    store.close().await;
+    db.close().await;
+}
+
+#[tokio::test]
 async fn row_lock_serializes_two_pools() {
     // Given a row locked by one pool.
     let (db, first, person) = setup().await;
