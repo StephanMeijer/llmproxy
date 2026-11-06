@@ -13,6 +13,9 @@ use serde::{Deserialize, Deserializer, de::Error as _};
 
 const DEFAULT_MAX_WAIT: Duration = Duration::from_mins(2);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Matches Kubernetes' default grace period; set `terminationGracePeriodSeconds` a few seconds
+/// longer so the drain finishes before `SIGKILL`.
+const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Matches the Anthropic SDKs' default for non-streaming calls, which send nothing until done.
 const DEFAULT_UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;
@@ -45,6 +48,9 @@ pub struct Config {
     pub max_wait: Duration,
     #[serde(default = "default_connect_timeout", deserialize_with = "seconds")]
     pub connect_timeout: Duration,
+    /// How long a SIGTERM/SIGINT drain may wait for open requests before exiting anyway.
+    #[serde(default = "default_shutdown_timeout", deserialize_with = "seconds")]
+    pub shutdown_timeout: Duration,
     /// Longest the upstream may stay silent, before or between response chunks.
     #[serde(
         default = "default_upstream_idle_timeout",
@@ -153,6 +159,10 @@ const fn default_connect_timeout() -> Duration {
     DEFAULT_CONNECT_TIMEOUT
 }
 
+const fn default_shutdown_timeout() -> Duration {
+    DEFAULT_SHUTDOWN_TIMEOUT
+}
+
 const fn default_upstream_idle_timeout() -> Duration {
     DEFAULT_UPSTREAM_IDLE_TIMEOUT
 }
@@ -230,6 +240,7 @@ impl Config {
         for (field, duration) in [
             ("max_wait", self.max_wait),
             ("connect_timeout", self.connect_timeout),
+            ("shutdown_timeout", self.shutdown_timeout),
         ] {
             if !representable(duration) {
                 return Err(ConfigError(format!(

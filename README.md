@@ -50,6 +50,7 @@ Any string value may contain `${VAR}`, filled in from the environment. An unset 
 | `proxy_token` | required | Legacy shared token for static routes; cannot access Claude. |
 | `max_wait` | `"120s"` | Longest a request is held by a limit before `429`. Whole seconds, written like `"120s"`. Waiting for a personal-token verifier is separate and capped at the shorter of `max_wait` and 10 s. |
 | `connect_timeout` | `"10s"` | Upstream dial timeout. |
+| `shutdown_timeout` | `"30s"` | Longest a `SIGTERM` or `SIGINT` drain waits for open requests before exiting anyway. Under Kubernetes, set `terminationGracePeriodSeconds` a few seconds longer than this, or the pod is killed mid-drain. |
 | `upstream_idle_timeout` | `"600s"` | Longest the upstream may send nothing, while waiting for the response headers or between body chunks. A stall before the headers gets `502`; a stall mid-body ends the response. It resets on every chunk, so a long stream that keeps sending is never cut off. Raise it for non-streaming requests that generate for longer than this. |
 | `max_body` | `16777216` | Largest request body in bytes. Larger gets `413`. |
 | `tool_choice_prefix` | none | See [tool_choice](#tool_choice-shim). |
@@ -238,7 +239,7 @@ Personal authentication and active concurrency-lease renewal observe database av
 
 Both histograms start the clock when the request arrives. `llm3_http_request_header_duration_seconds` stops it when the response headers are ready, so it covers time spent held on a limit, upstream retries and the upstream's time to respond; alert on a slowdown with this one. `llm3_http_request_duration_seconds` stops it when the response body ends, so a long stream lands in a high bucket however healthy it is, and a client that leaves mid-stream records the time until it left. A request the client abandons before the headers are ready is not observed, as with the counters. The buckets are fixed: 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 and 300 seconds.
 
-On `SIGTERM` or `SIGINT` the proxy stops accepting and lets in-flight and held requests finish.
+On `SIGTERM` or `SIGINT` the proxy stops accepting and lets in-flight and held requests finish, for at most `shutdown_timeout`. After that it logs a warning and exits, closing the connections still open, such as long streams.
 
 ## Not yet implemented
 
