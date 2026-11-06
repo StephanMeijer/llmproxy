@@ -13,6 +13,8 @@ use serde::{Deserialize, Deserializer, de::Error as _};
 
 const DEFAULT_MAX_WAIT: Duration = Duration::from_mins(2);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Kubernetes' default grace period, so the proxy exits before it would be killed.
+const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const MAX_IDENTIFIER_LENGTH: usize = 63;
@@ -43,6 +45,9 @@ pub struct Config {
     pub max_wait: Duration,
     #[serde(default = "default_connect_timeout", deserialize_with = "seconds")]
     pub connect_timeout: Duration,
+    /// How long a SIGTERM/SIGINT drain may wait for open requests before exiting anyway.
+    #[serde(default = "default_shutdown_timeout", deserialize_with = "seconds")]
+    pub shutdown_timeout: Duration,
     #[serde(default = "default_max_body")]
     pub max_body: usize,
     /// POST `<prefix>…/chat/completions` bodies with tools but no `tool_choice` get `"auto"`.
@@ -145,6 +150,10 @@ const fn default_connect_timeout() -> Duration {
     DEFAULT_CONNECT_TIMEOUT
 }
 
+const fn default_shutdown_timeout() -> Duration {
+    DEFAULT_SHUTDOWN_TIMEOUT
+}
+
 const fn default_retry_429() -> bool {
     true
 }
@@ -218,6 +227,7 @@ impl Config {
         for (field, duration) in [
             ("max_wait", self.max_wait),
             ("connect_timeout", self.connect_timeout),
+            ("shutdown_timeout", self.shutdown_timeout),
         ] {
             if !representable(duration) {
                 return Err(ConfigError(format!(

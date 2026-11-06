@@ -6,6 +6,7 @@ listen = "0.0.0.0:8788"
 metrics_listen = "0.0.0.0:9180"           # optional; omit to serve no metrics
 proxy_token = "${PROXY_TOKEN}"            # sent by clients as `Authorization: Bearer` or `x-api-key`
 max_wait = "120s"                         # a request held longer by a limit gets 429
+shutdown_timeout = "30s"                  # SIGTERM drain limit; open streams are closed after it
 connect_timeout = "10s"                   # upstream dial only; response reads are never cut
 max_body = 16777216                       # bytes; larger request bodies get 413
 tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" when tools are sent without one

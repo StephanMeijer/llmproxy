@@ -225,6 +225,67 @@ fn serves_requests_and_exits_cleanly_on_sigterm() {
     remove_run_files(&path);
 }
 
+/// An upstream that answers with headers and one chunk, then keeps the stream open for longer
+/// than any test runs. Returns its address.
+fn stuck_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let _ = stream.read(&mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n")
+            .unwrap();
+        sleep(Duration::from_mins(10));
+    });
+    addr
+}
+
+#[test]
+fn sigterm_exits_after_shutdown_timeout_even_with_a_stream_open() {
+    let upstream = stuck_upstream();
+    let route = format!(
+        "shutdown_timeout = \"1s\"\n[[route]]\nname = \"stuck\"\nupstream = \"http://{upstream}\"\n"
+    );
+    let path = write_config("deadline", &config(0, &route));
+    let mut server = spawn(&path, None);
+    let listen = bound(&mut server, &path, "listening");
+
+    // A client is mid-stream: the first chunk arrived and the body never ends.
+    let mut client = TcpStream::connect(listen).unwrap();
+    write!(
+        client,
+        "GET /stuck/x HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n\r\n"
+    )
+    .unwrap();
+    let mut seen = Vec::new();
+    let mut buffer = [0; 1024];
+    while !String::from_utf8_lossy(&seen).contains("first") {
+        let read = client.read(&mut buffer).unwrap();
+        assert!(
+            read > 0,
+            "the proxy closed the stream before the first chunk"
+        );
+        seen.extend_from_slice(buffer.get(..read).unwrap());
+    }
+
+    signal(&server, "TERM");
+    let signalled = Instant::now();
+    assert!(
+        wait_for_exit(&mut server).success(),
+        "the deadline exit should still be a clean exit"
+    );
+    assert!(
+        signalled.elapsed() < Duration::from_secs(10),
+        "exited only after {:?}",
+        signalled.elapsed()
+    );
+    let log = fs::read_to_string(path.with_extension("log")).unwrap();
+    assert!(log.contains("shutdown deadline passed"), "{log}");
+    remove_run_files(&path);
+}
+
 #[test]
 fn serves_without_a_metrics_listener_and_exits_cleanly_on_sigint() {
     let path = write_config("no-metrics", &config(0, ""));
