@@ -30,14 +30,16 @@ impl Storage {
         let options = PgConnectOptions::from_str(&config.url)
             .map_err(|_| StorageError::InvalidData)?
             .disable_statement_logging();
+        // Both settings are an int in ms, so clamp longer configured timeouts to its maximum.
+        let timeout_ms = config.acquire_timeout.as_millis().min(i32::MAX as u128);
         let pool = PgPoolOptions::new()
             .min_connections(0)
             .max_connections(config.max_connections)
             .acquire_timeout(config.acquire_timeout.min(config.connect_timeout))
             // Session settings bound every statement, including the schema check `begin()` runs first.
             .connect_lazy_with(options.clone().options([
-                ("statement_timeout", config.acquire_timeout.as_millis()),
-                ("lock_timeout", config.acquire_timeout.as_millis()),
+                ("statement_timeout", timeout_ms),
+                ("lock_timeout", timeout_ms),
             ]));
         Ok(Self {
             notifications: Arc::new(super::listener::Notifications::new(
