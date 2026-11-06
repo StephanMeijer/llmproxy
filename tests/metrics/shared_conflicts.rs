@@ -23,7 +23,7 @@ fn concurrent_shared_limit_conflicts_accumulate_in_one_bounded_series() {
         for _ in 0..THREADS {
             scope.spawn(|| {
                 for _ in 0..CONFLICTS {
-                    metrics.credentials().record_shared_limit_conflict();
+                    metrics.storage().record_shared_limit_conflict();
                 }
             });
         }

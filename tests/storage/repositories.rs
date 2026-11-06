@@ -124,21 +124,23 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     };
     assert!(tx.acquire_concurrency(&key, &fenced, 1).await.unwrap());
     tx.commit().await.unwrap();
-    // When the complete authoritative state is locked and read.
+    // When the authoritative state is locked and read.
     let mut tx = store.begin().await.unwrap();
-    let state = tx.lock_limit(&key).await.unwrap();
+    let rates = tx.lock_rates(&key).await.unwrap();
     // Then exact integer balances, FIFO identity and lease ownership survive.
-    assert_eq!(state.rates.first().unwrap().available_units, 42);
-    assert!(state.rates.first().unwrap().elapsed_microseconds >= 0);
-    assert_eq!(state.waiters.first().unwrap().enqueue_order, 1);
-    assert_eq!(state.leases.first().unwrap().owner, lease.owner);
+    assert_eq!(rates.first().unwrap().available_units, 42);
+    assert!(rates.first().unwrap().elapsed_microseconds >= 0);
+    assert_eq!(
+        tx.waiter_head(&key).await.unwrap().unwrap().enqueue_order,
+        1
+    );
     assert!(tx.renew_concurrency(&key, &fenced).await.unwrap());
     tx.remove_waiter(&key, &lease).await.unwrap();
     assert!(tx.release_concurrency(&key, &fenced).await.unwrap());
     tx.commit().await.unwrap();
     let mut tx = store.begin().await.unwrap();
-    let state = tx.lock_limit(&key).await.unwrap();
-    assert!(state.waiters.is_empty() && state.leases.is_empty());
+    assert!(tx.waiter_head(&key).await.unwrap().is_none());
+    assert!(!tx.renew_concurrency(&key, &fenced).await.unwrap());
     tx.rollback().await.unwrap();
     store.close().await;
     db.close().await;

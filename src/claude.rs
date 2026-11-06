@@ -10,7 +10,7 @@ use crate::{
         CompiledLimits, LeaseCancellations, PendingAdmission, SharedAdmissionError,
         SharedDefinition, SharedRateStore, SharedRequest,
     },
-    metrics::{CredentialMetrics, CredentialOperation, CredentialOutcome, CredentialProvider},
+    metrics::{CredentialOperation, CredentialOutcome, CredentialProvider, StorageMetrics},
     secret::{self, KeyRing},
     storage::{CredentialVersion, Credentials, Storage, StorageError},
 };
@@ -47,7 +47,8 @@ impl Claude {
         let route = Route {
             name: "claude".into(),
             name_header: HeaderValue::from_static("claude"),
-            base: format!("{}/", claude.upstream.trim_end_matches('/')),
+            // `Config::validate` already normalised it with exactly one trailing slash added.
+            base: claude.upstream.clone(),
             prefix: "/claude/".into(),
             headers: Vec::new(),
             retry_429: claude.retry_429,
@@ -107,7 +108,7 @@ impl Claude {
     }
 
     pub(super) async fn forward(&self, proxy: &Proxy, parts: &Parts, body: Body) -> Response {
-        let metrics = proxy.metrics.credentials();
+        let metrics = proxy.metrics.storage();
         let Ok(body) = to_bytes(body, proxy.max_body).await else {
             return error(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -217,7 +218,7 @@ impl Claude {
 /// Ends when the adapter (the only sender) is dropped or storage closes the listener.
 fn spawn_counts(
     credentials: Arc<Credentials>,
-    metrics: Arc<CredentialMetrics>,
+    metrics: Arc<StorageMetrics>,
     mut changes: tokio::sync::watch::Receiver<()>,
 ) -> mpsc::Sender<()> {
     let (wake, mut woken) = mpsc::channel(1);
@@ -254,7 +255,7 @@ fn request_model(body: &[u8]) -> Option<String> {
 async fn invalidate(
     credentials: &Credentials,
     version: CredentialVersion,
-    metrics: &CredentialMetrics,
+    metrics: &StorageMetrics,
 ) {
     let outcome = match credentials.invalidate(version).await {
         Ok(()) => CredentialOutcome::Success,
@@ -287,7 +288,7 @@ fn unavailable() -> Response {
     )
 }
 
-fn admission_unavailable(storage_error: StorageError, metrics: &CredentialMetrics) -> Response {
+fn admission_unavailable(storage_error: StorageError, metrics: &StorageMetrics) -> Response {
     if storage_error == StorageError::Conflict {
         metrics.record_shared_limit_conflict();
     }

@@ -18,7 +18,7 @@ async fn definition_lock_wait_respects_end_to_end_deadline() {
     setup.put_limit(&k, &d).await.unwrap();
     setup.commit().await.unwrap();
     let mut lock = f.first.begin().await.unwrap();
-    lock.lock_limit(&k).await.unwrap();
+    lock.lock_rates(&k).await.unwrap();
     let started = tokio::time::Instant::now();
     let result = tokio::time::timeout(
         BOUND,
@@ -102,7 +102,7 @@ async fn queued_deadline_returns_while_cleanup_waits_for_definition_lock() {
     tasks.spawn(async move { store.acquire(charge(&d, alice, 1)).await });
     f.waiters(1).await;
     let mut lock = f.first.begin().await.unwrap();
-    lock.lock_limit(&key(alice)).await.unwrap();
+    lock.lock_rates(&key(alice)).await.unwrap();
     let result = tokio::time::timeout(queued_budget + BOUND, tasks.join_next())
         .await
         .unwrap()

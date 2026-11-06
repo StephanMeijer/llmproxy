@@ -103,9 +103,9 @@ struct Snapshot {
 /// Process-local telemetry updated by storage/credential lifecycle owners.
 /// Labels are closed enums, so cardinality is bounded regardless of user data.
 #[derive(Default)]
-pub struct CredentialMetrics(Mutex<Snapshot>);
+pub struct StorageMetrics(Mutex<Snapshot>);
 
-impl CredentialMetrics {
+impl StorageMetrics {
     /// Counts one Claude admission rejected by conflicting shared limit state.
     /// This process-local counter saturates at `u64::MAX`.
     pub fn record_shared_limit_conflict(&self) {
@@ -194,13 +194,13 @@ impl CredentialMetrics {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialMetrics, Snapshot};
+    use super::{Snapshot, StorageMetrics};
     use std::sync::Mutex;
 
     #[test]
     fn shared_limit_conflicts_saturate() {
         // Given a counter already at its representable maximum.
-        let metrics = CredentialMetrics(Mutex::new(Snapshot {
+        let metrics = StorageMetrics(Mutex::new(Snapshot {
             shared_limit_conflicts: u64::MAX,
             ..Snapshot::default()
         }));

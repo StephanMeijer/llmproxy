@@ -1,4 +1,4 @@
-use super::{LimitKey, LimitSnapshot, Storage, StorageError};
+use super::{LimitKey, Storage, StorageError};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgListener, PgPoolOptions},
@@ -219,20 +219,5 @@ impl ChangeListener {
             }
         };
         tokio::time::timeout(wait, relevant).await.unwrap_or(Ok(()))
-    }
-
-    /// Waits for a hint, timeout, or reconnect and reloads the complete limit state.
-    /// # Errors
-    /// Returns a sanitized availability/schema error; subsequent calls retry.
-    pub async fn limit(
-        &mut self,
-        key: &LimitKey,
-        wait: Duration,
-    ) -> Result<LimitSnapshot, StorageError> {
-        self.changed(wait).await?;
-        let mut tx = self.storage.begin().await?;
-        let result = tx.lock_limit(key).await?;
-        tx.rollback().await?;
-        Ok(result)
     }
 }
