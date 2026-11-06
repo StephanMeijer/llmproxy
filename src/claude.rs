@@ -1,26 +1,42 @@
-use super::{
-    API_KEY_HEADER, Body, Config, ConfigError, Counted, HeaderValue, Instant, Limits, Method,
-    Outgoing, Parts, Proxy, Response, Route, StatusCode, error, millis, queue_timeout,
-    relay_stream, request_headers, to_bytes, upstream_url,
+//! What the per-person Claude route adds to the shared forwarding pipeline in `proxy`: the
+//! person's own provider key, admission through shared `PostgreSQL` limits, and invalidating a key
+//! the provider rejects.
+
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
 };
+
+use axum::http::HeaderValue;
+use tokio::sync::mpsc;
+
 use crate::{
     auth::Principal,
-    config::CredentialEncryptionConfig,
-    limit::shared::{
-        CompiledLimits, LeaseCancellations, PendingAdmission, SharedAdmissionError,
-        SharedDefinition, SharedRateStore, SharedRequest,
+    config::{Config, ConfigError, CredentialEncryptionConfig},
+    limit::{
+        Limits,
+        shared::{
+            Admission, CompiledLimits, LeaseCancellations, LeaseGuard, PendingAdmission,
+            SharedAdmissionError, SharedDefinition, SharedRateStore, SharedRequest,
+        },
     },
     metrics::{CredentialOperation, CredentialOutcome, CredentialProvider, StorageMetrics},
     storage::{CredentialVersion, Credentials, Storage, StorageError},
 };
-use std::sync::{Arc, OnceLock};
-use tokio::sync::mpsc;
 
-pub(super) const MESSAGES_PATH: &str = "/claude/v1/messages";
-const COUNTS_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+pub const MESSAGES_PATH: &str = "/claude/v1/messages";
+const COUNTS_RETRY: Duration = Duration::from_millis(250);
 
-pub(super) struct Claude {
-    route: Route,
+/// The adapter cannot serve this request: no usable credential, database or key ring.
+pub struct Unavailable;
+
+/// Why shared admission did not admit a request.
+pub enum Refused {
+    QueueTimeout,
+    Unavailable,
+}
+
+pub struct Claude {
     definitions: Vec<SharedDefinition>,
     storage: Storage,
     encryption: CredentialEncryptionConfig,
@@ -29,36 +45,40 @@ pub(super) struct Claude {
     counts: OnceLock<mpsc::Sender<()>>,
 }
 
+/// One authenticated person's request, with their credential captured for its whole lifetime.
+pub struct Person<'a> {
+    claude: &'a Claude,
+    id: uuid::Uuid,
+    credentials: &'a Arc<Credentials>,
+    store: &'a SharedRateStore,
+    version: CredentialVersion,
+    key: HeaderValue,
+}
+
 impl Claude {
-    pub(super) fn configure(
+    /// Splits the configured limits into shared (Claude) and local (static) ones.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] for a missing database or encryption section, or an invalid limit.
+    pub fn configure(
         config: &Config,
         storage: Option<Storage>,
     ) -> Result<(Option<Self>, Limits), ConfigError> {
-        let Some(claude) = &config.claude else {
+        if config.claude.is_none() {
             return Ok((None, Limits::new(&config.limits)?));
-        };
+        }
         let (postgres, storage) = config
             .postgres
             .as_ref()
             .zip(storage)
             .ok_or_else(|| ConfigError("Claude requires PostgreSQL".into()))?;
         let compiled = CompiledLimits::new(&config.limits, &postgres.namespace)?;
-        let route = Route {
-            name: "claude".into(),
-            name_header: HeaderValue::from_static("claude"),
-            // `Config::validate` already normalised it with exactly one trailing slash added.
-            base: claude.upstream.clone(),
-            prefix: "/claude/".into(),
-            headers: Vec::new(),
-            retry_429: claude.retry_429,
-        };
         let encryption = config
             .credential_encryption
             .as_ref()
             .ok_or_else(|| ConfigError("Claude requires credential encryption".into()))?;
         Ok((
             Some(Self {
-                route,
                 definitions: compiled.shared,
                 storage,
                 encryption: encryption.clone(),
@@ -69,16 +89,44 @@ impl Claude {
         ))
     }
 
+    /// Captures the authenticated person's active credential.
+    ///
+    /// # Errors
+    /// [`Unavailable`] when the caller is not a person, or the key ring, database or credential
+    /// cannot be used.
+    pub async fn person(
+        &self,
+        principal: Option<&Principal>,
+        max_wait: Duration,
+    ) -> Result<Person<'_>, Unavailable> {
+        let Some(Principal::Person(person)) = principal else {
+            return Err(Unavailable);
+        };
+        let (credentials, store) = self.runtime(max_wait).ok_or(Unavailable)?;
+        let snapshot = credentials
+            .snapshot(*person)
+            .await
+            .map_err(|_| Unavailable)?;
+        let mut key = HeaderValue::from_bytes(snapshot.secret.expose()).map_err(|_| Unavailable)?;
+        key.set_sensitive(true);
+        Ok(Person {
+            claude: self,
+            id: person.0,
+            credentials,
+            store,
+            version: snapshot.version,
+            key,
+        })
+    }
+
     /// Key files are read on first use and retried on every request until they load,
     /// so a mount that is late or briefly unreadable does not require a restart.
-    fn runtime(
-        &self,
-        max_wait: std::time::Duration,
-    ) -> Option<&(Arc<Credentials>, SharedRateStore)> {
+    fn runtime(&self, max_wait: Duration) -> Option<&(Arc<Credentials>, SharedRateStore)> {
         if let Some(runtime) = self.runtime.get() {
             return Some(runtime);
         }
-        let (credentials, store) = self.load_runtime(max_wait)?;
+        let credentials = Credentials::open(self.storage.clone(), &self.encryption).ok()?;
+        let store = SharedRateStore::new(self.storage.clone(), max_wait);
         Some(self.runtime.get_or_init(|| {
             let credentials = Arc::new(credentials);
             self.counts.get_or_init(|| {
@@ -92,120 +140,70 @@ impl Claude {
         }))
     }
 
-    fn load_runtime(
-        &self,
-        max_wait: std::time::Duration,
-    ) -> Option<(Credentials, SharedRateStore)> {
-        let credentials = Credentials::open(self.storage.clone(), &self.encryption).ok()?;
-        Some((
-            credentials,
-            SharedRateStore::new(self.storage.clone(), max_wait),
-        ))
-    }
-
-    pub(super) async fn forward(&self, proxy: &Proxy, parts: &Parts, body: Body) -> Response {
-        let metrics = proxy.metrics.storage();
-        let Ok(body) = to_bytes(body, proxy.max_body).await else {
-            return error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "body_too_large",
-                "request body exceeds max_body or could not be read",
-            );
-        };
-        let Some(Principal::Person(person)) = parts.extensions.get::<Principal>() else {
-            return unavailable();
-        };
-        let Some((credentials, store)) = self.runtime(proxy.max_wait) else {
-            return unavailable();
-        };
-        let Ok(snapshot) = credentials.snapshot(*person).await else {
-            return unavailable();
-        };
-        let Ok(mut key) = HeaderValue::from_bytes(snapshot.secret.expose()) else {
-            return unavailable();
-        };
-        key.set_sensitive(true);
-        let Some(url) = upstream_url(&self.route, "v1/messages", parts.uri.query()) else {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "invalid upstream path",
-            );
-        };
-        let model = request_model(&body);
-        let queued = Instant::now();
-        let waiting = Counted::new(&proxy.metrics.held);
-        let admission = PendingAdmission::new(
-            &self.definitions,
-            SharedRequest {
-                person: person.0,
-                path: MESSAGES_PATH,
-                model: model.as_deref(),
-                body_bytes: body.len(),
-            },
-        )
-        .acquire(store)
-        .await;
-        drop(waiting);
-        let admission = match admission {
-            Ok(admission) => admission,
-            Err(SharedAdmissionError::QueueTimeout(_)) => return queue_timeout(proxy.max_wait),
-            Err(SharedAdmissionError::Storage(storage_error)) => {
-                self.refresh_counts();
-                return admission_unavailable(storage_error, metrics);
-            }
-        };
-        let queue_wait_ms = millis(queued.elapsed());
-        let mut headers = request_headers(parts, &self.route);
-        headers.insert(API_KEY_HEADER, key);
-        let outgoing = Outgoing {
-            method: Method::POST,
-            url,
-            headers,
-            body,
-        };
-        let mut cancellation = LeaseCancellations::new(admission.leases());
-        let result = cancellation
-            .run(proxy.send_upstream(&self.route, &outgoing, queued + proxy.max_wait))
-            .await;
-        let (upstream, retries) = match result {
-            Ok(Ok(response)) => response,
-            Ok(Err(e)) => {
-                // Debug keeps the source chain (refused, DNS); without_url drops the client's query string.
-                tracing::warn!(route = "claude", error = ?e.without_url(), "upstream request failed");
-                return error(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "upstream request failed",
-                );
-            }
-            Err(_) => return lease_lost(),
-        };
-        if upstream.status() == StatusCode::UNAUTHORIZED {
-            let result = cancellation
-                .run(invalidate(credentials, snapshot.version, metrics))
-                .await;
-            self.refresh_counts();
-            if result.is_err() {
-                return unavailable();
-            }
-        }
-        relay_stream(
-            &self.route,
-            upstream.status(),
-            upstream.headers().clone(),
-            queue_wait_ms,
-            retries,
-            admission.stream(upstream.bytes_stream()),
-        )
-    }
-
     /// Queues at most one refresh behind the one in flight; extra requests coalesce.
     fn refresh_counts(&self) {
         if let Some(wake) = self.counts.get() {
             // A full channel already holds a pending refresh.
             let _ = wake.try_send(());
         }
+    }
+}
+
+impl Person<'_> {
+    /// The person's provider key, marked sensitive so it is never logged.
+    pub fn api_key(&self) -> HeaderValue {
+        self.key.clone()
+    }
+
+    /// Waits on every shared limit this request matches, in configuration order.
+    ///
+    /// # Errors
+    /// [`Refused::QueueTimeout`] when `max_wait` ran out, [`Refused::Unavailable`] when the
+    /// database could not decide (a conflicting shared definition is also counted).
+    pub async fn admit(
+        &self,
+        model: Option<&str>,
+        body_bytes: usize,
+    ) -> Result<Admission<Option<LeaseGuard>>, Refused> {
+        let admission = PendingAdmission::new(
+            &self.claude.definitions,
+            SharedRequest {
+                person: self.id,
+                path: MESSAGES_PATH,
+                model,
+                body_bytes,
+            },
+        )
+        .acquire(self.store)
+        .await;
+        match admission {
+            Ok(admission) => Ok(admission),
+            Err(SharedAdmissionError::QueueTimeout(_)) => Err(Refused::QueueTimeout),
+            Err(SharedAdmissionError::Storage(storage_error)) => {
+                self.claude.refresh_counts();
+                if storage_error == StorageError::Conflict {
+                    self.claude.storage.metrics().record_shared_limit_conflict();
+                }
+                Err(Refused::Unavailable)
+            }
+        }
+    }
+
+    /// The provider answered `401`: invalidate exactly this credential generation, unless a
+    /// lease is lost first.
+    ///
+    /// # Errors
+    /// [`Unavailable`] when a lease was lost while invalidating.
+    pub async fn rejected(&self, cancellation: &mut LeaseCancellations) -> Result<(), Unavailable> {
+        let result = cancellation
+            .run(invalidate(
+                self.credentials,
+                self.version,
+                self.claude.storage.metrics(),
+            ))
+            .await;
+        self.claude.refresh_counts();
+        result.map_err(|_| Unavailable)
     }
 }
 
@@ -237,17 +235,6 @@ fn spawn_counts(
     wake
 }
 
-fn request_model(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-}
-
 async fn invalidate(
     credentials: &Credentials,
     version: CredentialVersion,
@@ -266,27 +253,4 @@ async fn invalidate(
         CredentialOperation::Invalidate,
         outcome,
     );
-}
-
-fn lease_lost() -> Response {
-    tracing::warn!(
-        route = "claude",
-        "concurrency lease lost during upstream request"
-    );
-    unavailable()
-}
-
-fn unavailable() -> Response {
-    error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "adapter_unavailable",
-        "Claude adapter unavailable",
-    )
-}
-
-fn admission_unavailable(storage_error: StorageError, metrics: &StorageMetrics) -> Response {
-    if storage_error == StorageError::Conflict {
-        metrics.record_shared_limit_conflict();
-    }
-    unavailable()
 }
