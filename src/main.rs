@@ -33,10 +33,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         print!("{}", help::USAGE);
         return Ok(());
     }
-    if args
-        .first()
-        .is_some_and(|arg| arg == "auth" || arg == "credentials")
-    {
+    if args.first().is_some_and(|arg| arg == "auth") {
         return operator::run(&args).await;
     }
     if args.first().is_some_and(|arg| arg == "db") {

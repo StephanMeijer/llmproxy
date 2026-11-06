@@ -33,7 +33,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
         .await
         .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
-        .args(["credentials", "reencrypt", "--to", "new"])
+        .args(["auth", "credentials", "reencrypt", "--to", "new"])
         .env("LLMPROXY_CONFIG", &db.path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -54,7 +54,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     assert!(!killed.status.success());
     lock.rollback().await.unwrap();
     let restarted = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
-        .args(["credentials", "reencrypt", "--to", "new"])
+        .args(["auth", "credentials", "reencrypt", "--to", "new"])
         .env("LLMPROXY_CONFIG", &db.path)
         .output()
         .unwrap();

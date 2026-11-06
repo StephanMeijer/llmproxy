@@ -31,9 +31,14 @@ fn malformed_database_and_rotation_commands_fail_before_loading_configuration() 
         vec!["db", "unknown"],
         vec!["db", "migrate", "--secret-canary"],
         vec!["db", "migrate", "a", "b"],
-        vec!["credentials"],
-        vec!["credentials", "reencrypt"],
-        vec!["credentials", "reencrypt", "--wrong", "secret-canary"],
+        vec!["auth", "credentials", "reencrypt"],
+        vec![
+            "auth",
+            "credentials",
+            "reencrypt",
+            "--wrong",
+            "secret-canary",
+        ],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
             .args(args)
