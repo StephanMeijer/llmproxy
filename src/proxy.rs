@@ -29,7 +29,7 @@ use crate::{
     auth::{AuthError, Authenticator, MAX_VERIFY_WAIT, RouteKind},
     config::{Config, ConfigError},
     limit::Limits,
-    metrics::CredentialMetrics,
+    metrics::StorageMetrics,
     storage::Storage,
 };
 
@@ -226,7 +226,7 @@ fn render_durations(name: &str, help: &str, durations: &Durations) -> String {
 /// Request counters, two gauges and two duration histograms, rendered as Prometheus text.
 #[derive(Default)]
 pub struct Metrics {
-    credentials: Arc<CredentialMetrics>,
+    storage: Arc<StorageMetrics>,
     /// Requests from arrival until their response body ends.
     in_flight: Arc<AtomicI64>,
     /// Requests currently waiting on a limit.
@@ -240,8 +240,8 @@ pub struct Metrics {
 
 impl Metrics {
     /// Bounded telemetry for database and credential lifecycle owners.
-    pub fn credentials(&self) -> &CredentialMetrics {
-        &self.credentials
+    pub fn storage(&self) -> &StorageMetrics {
+        &self.storage
     }
 
     fn record(&self, route: &str, code: u16) {
@@ -288,7 +288,7 @@ impl Metrics {
              {headers}{end}{}",
             self.in_flight.load(Ordering::Relaxed),
             self.held.load(Ordering::Relaxed),
-            self.credentials.render()
+            self.storage.render()
         )
     }
 }
@@ -376,7 +376,7 @@ impl Proxy {
             .transpose()
             .map_err(|e| ConfigError(format!("postgres: {e}")))?;
         let metrics = Metrics {
-            credentials: storage
+            storage: storage
                 .as_ref()
                 .map_or_else(Arc::default, |storage| Arc::clone(storage.metrics())),
             ..Metrics::default()

@@ -1,5 +1,5 @@
 use super::{StorageError, check_connection_schema};
-use crate::{config::PostgresConfig, metrics::CredentialMetrics};
+use crate::{config::PostgresConfig, metrics::StorageMetrics};
 use sqlx::{
     ConnectOptions, PgPool, Postgres, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -9,7 +9,7 @@ use std::{str::FromStr, sync::Arc};
 /// Lazy namespace-scoped database runtime. Construction never contacts `PostgreSQL`.
 #[derive(Clone)]
 pub struct Storage {
-    metrics: Arc<CredentialMetrics>,
+    metrics: Arc<StorageMetrics>,
     pub(super) pool: PgPool,
     pub(super) namespace: String,
     pub(super) notifications: Arc<super::listener::Notifications>,
@@ -52,7 +52,7 @@ impl Storage {
 
     /// The metrics this runtime reports database availability to; share it with the renderer.
     #[must_use]
-    pub const fn metrics(&self) -> &Arc<CredentialMetrics> {
+    pub const fn metrics(&self) -> &Arc<StorageMetrics> {
         &self.metrics
     }
 
@@ -86,7 +86,7 @@ impl Storage {
 pub struct StorageTransaction {
     pub(super) tx: Transaction<'static, Postgres>,
     pub(super) namespace: String,
-    metrics: Arc<CredentialMetrics>,
+    metrics: Arc<StorageMetrics>,
     /// The limit definition row this transaction already holds `FOR UPDATE`; row locks last until
     /// commit or rollback, so locking it again would only cost a round trip.
     pub(super) locked: Option<super::LimitKey>,
@@ -132,7 +132,7 @@ impl StorageTransaction {
 
 /// A completed round trip proves availability; only an outage disproves it.
 fn observe<T>(
-    metrics: &CredentialMetrics,
+    metrics: &StorageMetrics,
     result: Result<T, StorageError>,
 ) -> Result<T, StorageError> {
     match &result {
