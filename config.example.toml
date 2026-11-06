@@ -28,7 +28,8 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 # keys = { primary = "/run/secrets/llmproxy-primary" } # mounted 32-byte master key; never inline key bytes
 # Both key files contain exactly 32 random binary bytes; keep fingerprint key stable.
 # Stage new encryption keys on all replicas before changing active_key_id/reencrypting.
-# Runtime keys are loaded once: restart replicas after key-file repairs or changes.
+# Runtime keys are kept after the first successful load: restart replicas after changing them.
+# A missing or malformed key file is retried on each Claude request, so repairing one needs no restart.
 #
 # [claude]                               # reserves /claude; do not add a static route named claude
 # upstream = "https://api.anthropic.com"  # default; normalized with a trailing slash
