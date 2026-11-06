@@ -26,7 +26,6 @@ pub enum Principal {
 /// Route classification precedes authentication, including unknown paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteKind {
-    Health,
     Static,
     Claude,
     Unknown,
@@ -76,7 +75,7 @@ impl Authenticator {
         }
     }
 
-    /// Health is public; every other route requires one unambiguous token.
+    /// Every route requires one unambiguous token; the proxy answers `/healthz` before this.
     /// # Errors
     /// Returns unauthorized for invalid tokens, forbidden for legacy Claude access,
     /// unavailable when the database or verifier cannot establish authority, or busy when no
@@ -85,16 +84,12 @@ impl Authenticator {
         &self,
         route: RouteKind,
         headers: &HeaderMap,
-    ) -> Result<Option<Principal>, AuthError> {
-        if route == RouteKind::Health {
-            return Ok(None);
-        }
+    ) -> Result<Principal, AuthError> {
         let token = request_token(headers)?;
         if constant_time_eq(token.as_bytes(), self.legacy.as_bytes()) {
             return match route {
                 RouteKind::Claude => Err(AuthError::Forbidden),
-                RouteKind::Static | RouteKind::Unknown => Ok(Some(Principal::LegacyStatic)),
-                RouteKind::Health => Ok(None),
+                RouteKind::Static | RouteKind::Unknown => Ok(Principal::LegacyStatic),
             };
         }
         let token = ProxyToken::parse(token).map_err(|_| AuthError::Unauthorized)?;
@@ -125,7 +120,7 @@ impl Authenticator {
         {
             return Err(AuthError::Unauthorized);
         }
-        Ok(Some(Principal::Person(record.person_id)))
+        Ok(Principal::Person(record.person_id))
     }
 }
 
