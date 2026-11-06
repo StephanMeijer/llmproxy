@@ -50,7 +50,7 @@ Any string value may contain `${VAR}`, filled in from the environment. An unset 
 | `proxy_token` | required | Legacy shared token for static routes; cannot access Claude. |
 | `max_wait` | `"120s"` | Longest a request is held by a limit before `429`. Whole seconds, written like `"120s"`. Waiting for a personal-token verifier is separate and capped at the shorter of `max_wait` and 10 s. |
 | `connect_timeout` | `"10s"` | Upstream dial timeout. Reading a response is never cut off, so long streams are safe. |
-| `shutdown_timeout` | `"30s"` | Longest a `SIGTERM` or `SIGINT` drain waits for open requests before exiting anyway. The default fits Kubernetes' default 30 s grace period. |
+| `shutdown_timeout` | `"30s"` | Longest a `SIGTERM` or `SIGINT` drain waits for open requests before exiting anyway. Under Kubernetes, set `terminationGracePeriodSeconds` a few seconds longer than this, or the pod is killed mid-drain. |
 | `max_body` | `16777216` | Largest request body in bytes. Larger gets `413`. |
 | `tool_choice_prefix` | none | See [tool_choice](#tool_choice-shim). |
 

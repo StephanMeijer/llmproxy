@@ -13,7 +13,8 @@ use serde::{Deserialize, Deserializer, de::Error as _};
 
 const DEFAULT_MAX_WAIT: Duration = Duration::from_mins(2);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Kubernetes' default grace period, so the proxy exits before it would be killed.
+/// Matches Kubernetes' default grace period; set `terminationGracePeriodSeconds` a few seconds
+/// longer so the drain finishes before `SIGKILL`.
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;

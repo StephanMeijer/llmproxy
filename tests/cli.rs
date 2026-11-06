@@ -254,6 +254,7 @@ fn sigterm_exits_after_shutdown_timeout_even_with_a_stream_open() {
 
     // A client is mid-stream: the first chunk arrived and the body never ends.
     let mut client = TcpStream::connect(listen).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
     write!(
         client,
         "GET /stuck/x HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n\r\n"
