@@ -29,7 +29,7 @@ async fn database_outage_cancels_renewal_and_recovers_while_static_continues() {
     let start = std::time::Instant::now();
     // When existing database sessions are terminated and new connections denied.
     f.db.available(false).await;
-    let config = b.config.clone();
+    let config = b.config();
     drop(b);
     let b = super::process::Replica::start(&config).await;
     assert_eq!(
@@ -71,8 +71,8 @@ async fn database_outage_cancels_renewal_and_recovers_while_static_continues() {
 async fn incompatible_schema_and_failed_transaction_never_reach_provider() {
     // Given two replicas and a database trigger rejecting admission writes.
     let mut f = Fixture::new("schema-transaction").await;
-    let a = f.binary(super::LIMIT).await;
-    let b = f.binary(super::LIMIT).await;
+    let a = f.in_process(super::LIMIT);
+    let b = f.in_process(super::LIMIT);
     sqlx::raw_sql("CREATE FUNCTION reject_waiter() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected rollback'; END $$; CREATE TRIGGER reject_waiter BEFORE INSERT ON fifo_waiters FOR EACH ROW EXECUTE FUNCTION reject_waiter();")
         .execute(&f.db.pool).await.unwrap();
     // When admission rolls back and then the schema becomes incompatible.
@@ -164,8 +164,8 @@ async fn terminated_waiter_expires_and_live_waiter_advances() {
 async fn upstream_connection_error_releases_all_shared_leases() {
     // Given two replicas whose provider listener has stopped.
     let mut f = Fixture::new("upstream-connect-error").await;
-    let a = f.binary(super::LIMIT).await;
-    let b = f.binary(super::LIMIT).await;
+    let a = f.in_process(super::LIMIT);
+    let b = f.in_process(super::LIMIT);
     f.provider.stop().await;
     // When each replica attempts a provider connection.
     for replica in [&a, &b] {
@@ -185,9 +185,9 @@ async fn upstream_connection_error_releases_all_shared_leases() {
 async fn wrong_key_on_startup_fails_closed_with_static_continuity() {
     // Given a healthy replica and a second starting with the wrong encryption material.
     let mut f = Fixture::new("wrong-key-startup").await;
-    let a = f.binary("").await;
+    let a = f.in_process("");
     std::fs::write(f.db.directory.join("old"), [9; 32]).unwrap();
-    let b = f.binary("").await;
+    let b = f.in_process("");
     // When personal Claude traffic arrives on the incorrectly configured replica.
     assert_eq!(
         f.request(&b, 0).send().await.unwrap().status(),

@@ -89,10 +89,10 @@ async fn forward(incoming: TcpStream, outgoing: TcpStream, fault: (Arc<Notify>, 
 
 #[tokio::test]
 async fn lost_commit_acknowledgement_preserves_committed_credential_and_retry_safety() {
-    // Given two real replicas and a bridge that drops PostgreSQL CommandComplete(COMMIT).
+    // Given two in-process replicas and a bridge that drops PostgreSQL CommandComplete(COMMIT).
     let mut f = Fixture::new("commit-ack-loss").await;
-    let a = f.binary("").await;
-    let b = f.binary("").await;
+    let a = f.in_process("");
+    let b = f.in_process("");
     let mut bridge = Bridge::new(&f.db.config.url).await;
     let config = f.db.directory.join("fault-operator.toml");
     let text = std::fs::read_to_string(&f.config)

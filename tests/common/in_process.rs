@@ -10,6 +10,7 @@ use tokio::runtime::Runtime;
 /// and stall mid-handshake while the blocking database drop holds that runtime.
 pub struct InProcess {
     pub base: String,
+    #[allow(dead_code, reason = "postgres_integration never scrapes metrics")]
     pub metrics: String,
     runtime: Option<Runtime>,
 }
