@@ -5,7 +5,7 @@ use llmproxy::{
     proxy::{Proxy, metrics_router, router},
     storage,
 };
-use tokio::{net::TcpListener, signal};
+use tokio::{net::TcpListener, signal, sync::watch};
 
 const CONFIG_ENV: &str = "LLMPROXY_CONFIG";
 const DEFAULT_CONFIG: &str = "/etc/llmproxy/config.toml";
@@ -53,6 +53,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let config = Config::load(&PathBuf::from(&path))?;
     let (listen, metrics_listen) = (config.listen, config.metrics_listen);
+    let shutdown_timeout = config.shutdown_timeout;
     let proxy = Arc::new(Proxy::new(config)?);
     if check_only {
         println!("{path}: ok");
@@ -73,20 +74,56 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         .map_err(|e| format!("bind {listen}: {e}"))?;
     // The bound address, not the configured one, so port 0 reports the port actually chosen.
     tracing::info!(target: LISTEN_TARGET, listen = %listener.local_addr()?, "listening");
-    let clients = axum::serve(listener, router(proxy.clone())).with_graceful_shutdown(shutdown());
-    match metrics_listen {
+    let metrics_listener = match metrics_listen {
         Some(addr) => {
             let listener = TcpListener::bind(addr)
                 .await
                 .map_err(|e| format!("bind {addr}: {e}"))?;
             tracing::info!(target: LISTEN_TARGET, listen = %listener.local_addr()?, "serving metrics");
-            let metrics =
-                axum::serve(listener, metrics_router(proxy)).with_graceful_shutdown(shutdown());
-            tokio::try_join!(clients.into_future(), metrics.into_future())?;
+            Some(listener)
         }
-        None => clients.await?,
+        None => None,
+    };
+
+    // One signal starts the drain on both listeners and the deadline that ends it.
+    let (stop, stopped) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown().await;
+        stop.send_replace(true);
+    });
+    let clients = axum::serve(listener, router(proxy.clone()))
+        .with_graceful_shutdown(signalled(stopped.clone()));
+    let metrics_stopped = stopped.clone();
+    let served = async move {
+        match metrics_listener {
+            Some(listener) => {
+                let metrics = axum::serve(listener, metrics_router(proxy))
+                    .with_graceful_shutdown(signalled(metrics_stopped));
+                tokio::try_join!(clients.into_future(), metrics.into_future()).map(|_| ())
+            }
+            None => clients.await,
+        }
+    };
+    tokio::select! {
+        served = served => served?,
+        () = async {
+            signalled(stopped).await;
+            tokio::time::sleep(shutdown_timeout).await;
+        } => {
+            // Returning drops the runtime and with it every connection still open.
+            tracing::warn!(
+                timeout_secs = shutdown_timeout.as_secs(),
+                "shutdown deadline passed; dropping remaining connections"
+            );
+        }
     }
     Ok(())
+}
+
+/// Resolves once a shutdown signal arrived, or at once if the signal task is gone.
+async fn signalled(mut stopped: watch::Receiver<bool>) {
+    // An error means the sender dropped without signalling; stopping is the safe reading.
+    let _ = stopped.wait_for(|stop| *stop).await;
 }
 
 async fn migrate(args: &[String]) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -107,7 +144,7 @@ async fn migrate(args: &[String]) -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-/// Resolves on SIGINT or SIGTERM; in-flight and held requests then finish before exit.
+/// Resolves on SIGINT or SIGTERM; in-flight and held requests then get `shutdown_timeout` to finish.
 async fn shutdown() {
     #[cfg(unix)]
     {
