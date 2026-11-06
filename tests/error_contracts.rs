@@ -23,6 +23,7 @@ fn public_failures_have_distinct_bounded_diagnostics_without_inner_errors() {
         Box::new(StorageError::IncompatibleSchema),
         Box::new(StorageError::UnsupportedServer),
         Box::new(StorageError::MigrationFailed),
+        Box::new(StorageError::MigrationLocked),
         Box::new(StorageError::Conflict),
         Box::new(StorageError::InvalidData),
         Box::new(StorageError::NotFound),

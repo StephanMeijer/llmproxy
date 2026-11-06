@@ -1,6 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use llmproxy::storage::{self, StorageError};
+use llmproxy::{
+    config::PostgresConfig,
+    storage::{self, StorageError},
+};
 use sqlx::AssertSqlSafe;
 use std::{fs, process::Command, time::Duration};
 use uuid::Uuid;
@@ -44,6 +47,50 @@ async fn concurrent_cli_migrations_are_idempotent() {
         .unwrap();
     assert_eq!(count, 3);
     storage::check_schema(&db.pool).await.unwrap();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn a_held_migration_lock_times_out_with_a_named_cause() {
+    const MIGRATION_LOCK: i64 = 0x006c_6c6d_7072_6f78;
+    let db = Database::new().await;
+    let mut holder = db.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATION_LOCK)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    // The CLI reads the test's config file, which omits acquire_timeout, so the 10s default bounds the wait.
+    let blocked = Command::new(BIN)
+        .args(["db", "migrate"])
+        .arg(&db.path)
+        .output()
+        .unwrap();
+    assert_eq!(blocked.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(stderr.contains("migration lock held"), "{stderr}");
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATION_LOCK)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    drop(holder);
+    storage::migrate(&db.config).await.unwrap();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_acquire_timeout_beyond_lock_timeout_range_still_migrates() {
+    let db = Database::new().await;
+    let config = PostgresConfig {
+        url: db.config.url.clone(),
+        namespace: db.config.namespace.clone(),
+        max_connections: db.config.max_connections,
+        connect_timeout: db.config.connect_timeout,
+        acquire_timeout: Duration::from_hours(30 * 24),
+    };
+    storage::migrate(&config).await.unwrap();
     db.close().await;
 }
 
@@ -259,9 +306,10 @@ fn storage_errors_render_distinct_messages() {
         StorageError::IncompatibleSchema,
         StorageError::UnsupportedServer,
         StorageError::MigrationFailed,
+        StorageError::MigrationLocked,
     ]
     .iter()
     .map(ToString::to_string)
     .collect();
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.len(), 5);
 }
