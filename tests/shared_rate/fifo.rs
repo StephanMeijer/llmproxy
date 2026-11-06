@@ -149,8 +149,20 @@ async fn a_head_waiting_for_budget_sleeps_instead_of_polling() {
             .await
             .unwrap()
     };
-    // When it is left alone for a while.
-    let before = polls().await;
+    // When it is left alone for a while, counted from a poll after its enqueue: the poll right
+    // after enqueue and the one woken by the listener connecting may otherwise both land inside.
+    let enqueued = polls().await;
+    let before = tokio::time::timeout(LONG, async {
+        loop {
+            let now = polls().await;
+            if now > enqueued {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let after = polls().await;
     // Then it polled at most twice, where a 250 ms poll would have run ten times.
