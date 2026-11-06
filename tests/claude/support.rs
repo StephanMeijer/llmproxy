@@ -43,7 +43,7 @@ enum Run {
         log: PathBuf,
     },
     // Dropping it stops the proxy's runtime.
-    InProcess(#[expect(dead_code, reason = "held only to be dropped")] in_process::InProcess),
+    InProcess(in_process::InProcess),
 }
 impl Replica {
     /// The binary's combined stdout/stderr; in-process replicas have none.
@@ -222,30 +222,42 @@ impl Fixture {
         super::eventually::count_eventually(&self.db.pool, &query, count, WAIT).await;
     }
 
-    /// Stops the replicas and scans every binary's log for secrets.
+    /// Stops the replicas and scans every replica's log, binary or in-process, for secrets.
     pub async fn close(mut self, replicas: Vec<Replica>) {
+        let mut served_requests = replicas.iter().all(|r| r.log().is_some());
         for replica in replicas {
-            let log = replica.log().map(Path::to_path_buf);
+            let captured = match &replica.run {
+                Run::InProcess(served) => Some(served.log()),
+                Run::Binary { .. } => None,
+            };
+            let file = replica.log().map(Path::to_path_buf);
             drop(replica);
-            let Some(log) = log else { continue };
-            let bytes = fs::read(&log).unwrap();
+            let bytes = captured.unwrap_or_else(|| fs::read(file.as_ref().unwrap()).unwrap());
+            // Guards against scanning an empty capture: every test sends at least one request.
+            served_requests |= file.is_none() && contains(&bytes, b"\"message\":\"request\"");
             for secret in [
                 ALICE_KEY,
                 BOB_KEY,
                 self.alice.expose().as_bytes(),
                 self.bob.expose().as_bytes(),
             ] {
-                assert!(
-                    !bytes.windows(secret.len()).any(|window| window == secret),
-                    "secret leaked to binary log"
-                );
+                assert!(!contains(&bytes, secret), "secret leaked to replica log");
             }
-            fs::remove_file(log).unwrap();
+            if let Some(file) = file {
+                fs::remove_file(file).unwrap();
+            }
         }
+        assert!(served_requests, "no in-process replica logged a request");
         self.provider.stop().await;
         self.storage.close().await;
         fs::remove_file(self.key).unwrap();
         fs::remove_file(self.pepper).unwrap();
         self.db.close().await;
     }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
