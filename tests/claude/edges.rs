@@ -8,7 +8,7 @@ async fn invalid_fingerprint_file_fails_closed_until_it_is_fixed() {
     let mut f = Fixture::new().await;
     let pepper = f.db.path.with_extension("pepper");
     std::fs::write(&pepper, [2; 31]).unwrap();
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     assert_eq!(
         f.request(&a, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -30,7 +30,7 @@ async fn one_replica_shares_one_pool_and_one_listener_between_auth_and_claude() 
     f.db.config.url = format!("{}?application_name={name}", f.db.config.url);
     // A pool of one makes the count exact: a second pool would need a second session.
     f.db.config.max_connections = 1;
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     let client = reqwest::Client::new();
     // When personal tokens authenticate on the static route and forward to Claude, twice.
     for _ in 0..2 {
@@ -69,7 +69,7 @@ async fn stored_credential_with_header_control_bytes_never_reaches_provider() {
         )
         .await
         .unwrap();
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     assert_eq!(
         f.request(&a, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE

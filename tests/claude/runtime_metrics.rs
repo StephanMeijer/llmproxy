@@ -6,13 +6,13 @@ use std::time::Duration;
 /// Credential counts refresh in the background, so poll until `expected` counts appear.
 pub async fn scrape(
     f: &Fixture,
-    binary: &Binary,
+    replica: &Replica,
     phase: &str,
     expected: Option<[u64; 4]>,
 ) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let text = loop {
-        let text = reqwest::get(&binary.metrics)
+        let text = reqwest::get(&replica.metrics)
             .await
             .unwrap()
             .text()
@@ -95,39 +95,39 @@ async fn connections_except(f: &Fixture, enabled: bool, keep: Option<i32>) {
 }
 
 #[tokio::test]
-async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
-    // Given a binary serving two installed credentials.
+async fn metrics_follow_durable_state_outage_and_recovery() {
+    // Given a replica serving two installed credentials.
     let mut f = Fixture::new().await;
-    let binary = f.binary("", "").await;
+    let replica = f.in_process("", "");
     // When real requests observe mutations and an outage in the same process.
-    let request = tokio::spawn(f.request(&binary, false).send());
+    let request = tokio::spawn(f.request(&replica, false).send());
     reply(f.hit().await, StatusCode::OK, "ok");
     assert_eq!(request.await.unwrap().unwrap().status(), StatusCode::OK);
-    let text = scrape(&f, &binary, "installed", Some([2, 0, 0, 0])).await;
+    let text = scrape(&f, &replica, "installed", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("llm3_postgres_available 1\n"));
     assert!(!text.contains("operation=\"install\""));
 
-    let request = tokio::spawn(f.request(&binary, false).send());
+    let request = tokio::spawn(f.request(&replica, false).send());
     reply(f.hit().await, StatusCode::UNAUTHORIZED, "rejected");
     assert_eq!(
         request.await.unwrap().unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    let text = scrape(&f, &binary, "invalid", Some([1, 1, 0, 0])).await;
+    let text = scrape(&f, &replica, "invalid", Some([1, 1, 0, 0])).await;
     counts(&text, [1, 1, 0, 0]);
     assert!(text.contains("operation=\"invalidate\",outcome=\"success\"} 1\n"));
 
     f.credentials.remove(f.bob_version).await.unwrap();
     assert_eq!(
-        f.request(&binary, true).send().await.unwrap().status(),
+        f.request(&replica, true).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     counts(
-        &scrape(&f, &binary, "removed", Some([0, 1, 1, 0])).await,
+        &scrape(&f, &replica, "removed", Some([0, 1, 1, 0])).await,
         [0, 1, 1, 0],
     );
-    // The test keeps one connection so it can write while the binary is cut off.
+    // The test keeps one connection so it can write while the replica is cut off.
     let mut writer = f.db.pool.acquire().await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *writer)
@@ -135,10 +135,10 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
         .unwrap();
     connections_except(&f, false, Some(pid)).await;
     assert_eq!(
-        f.request(&binary, false).send().await.unwrap().status(),
+        f.request(&replica, false).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let text = scrape(&f, &binary, "outage", Some([0, 1, 1, 0])).await;
+    let text = scrape(&f, &replica, "outage", Some([0, 1, 1, 0])).await;
     counts(&text, [0, 1, 1, 0]);
     assert!(text.contains("llm3_postgres_available 0\n"));
     // A change the listener cannot hear: only the reconnect refresh can report it.
@@ -149,19 +149,19 @@ async fn real_binary_metrics_follow_durable_state_outage_and_recovery() {
         .unwrap();
     drop(writer);
     connections(&f, true).await;
-    let text = scrape(&f, &binary, "recovery", Some([1, 0, 1, 0])).await;
+    let text = scrape(&f, &replica, "recovery", Some([1, 0, 1, 0])).await;
     // Then counts follow durable state changed during the outage, with no request in between.
     counts(&text, [1, 0, 1, 0]);
     assert!(text.contains("llm3_postgres_available 1\n"));
-    f.close(vec![binary]).await;
+    f.close(vec![replica]).await;
 }
 
 #[tokio::test]
-async fn real_binary_records_invalidation_conflict_and_database_failure() {
+async fn records_invalidation_conflict_and_database_failure() {
     // Given an admitted generation that is replaced while upstream is held.
     let mut f = Fixture::new().await;
-    let binary = f.binary("", "").await;
-    let request = tokio::spawn(f.request(&binary, false).send());
+    let replica = f.in_process("", "");
+    let request = tokio::spawn(f.request(&replica, false).send());
     let hit = f.hit().await;
     f.credentials
         .replace(
@@ -176,12 +176,12 @@ async fn real_binary_records_invalidation_conflict_and_database_failure() {
         request.await.unwrap().unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    let text = scrape(&f, &binary, "conflict", Some([2, 0, 0, 0])).await;
+    let text = scrape(&f, &replica, "conflict", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("operation=\"invalidate\",outcome=\"conflict\"} 1\n"));
     assert!(text.contains("llm3_shared_limit_conflicts_total{provider=\"anthropic\"} 0\n"));
     assert!(!text.contains("runtime-replacement-canary"));
-    let request = tokio::spawn(f.request(&binary, true).send());
+    let request = tokio::spawn(f.request(&replica, true).send());
     let hit = f.hit().await;
     connections(&f, false).await;
     reply(hit, StatusCode::UNAUTHORIZED, "unavailable");
@@ -189,17 +189,17 @@ async fn real_binary_records_invalidation_conflict_and_database_failure() {
         request.await.unwrap().unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    let text = scrape(&f, &binary, "invalidation-unavailable", Some([2, 0, 0, 0])).await;
+    let text = scrape(&f, &replica, "invalidation-unavailable", Some([2, 0, 0, 0])).await;
     // Then counters distinguish durable conflict and failure, retaining the last counts.
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("llm3_postgres_available 0\n"));
     assert!(text.contains("operation=\"invalidate\",outcome=\"unavailable\"} 1\n"));
     connections(&f, true).await;
-    f.close(vec![binary]).await;
+    f.close(vec![replica]).await;
 }
 
 #[tokio::test]
-async fn real_binary_counts_corrupt_and_missing_key_envelopes_as_unavailable() {
+async fn counts_corrupt_and_missing_key_envelopes_as_unavailable() {
     // Given one ciphertext with a failed authentication tag and one missing key identifier.
     let f = Fixture::new().await;
     sqlx::query("UPDATE provider_credentials SET ciphertext=set_byte(ciphertext,0,get_byte(ciphertext,0) # 1) WHERE person_id=$1")
@@ -209,32 +209,32 @@ async fn real_binary_counts_corrupt_and_missing_key_envelopes_as_unavailable() {
         .execute(&f.db.pool)
         .await
         .unwrap();
-    let binary = f.binary("", "").await;
+    let replica = f.in_process("", "");
     // When authenticated requests trigger a complete authoritative refresh.
     for bob in [false, true] {
         assert_eq!(
-            f.request(&binary, bob).send().await.unwrap().status(),
+            f.request(&replica, bob).send().await.unwrap().status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
     }
-    let text = scrape(&f, &binary, "undecryptable", Some([0, 0, 0, 2])).await;
+    let text = scrape(&f, &replica, "undecryptable", Some([0, 0, 0, 2])).await;
     // Then local decryption failures are not reported as database outages or active credentials.
     counts(&text, [0, 0, 0, 2]);
     assert!(text.contains("llm3_postgres_available 1\n"));
     assert!(!text.contains("missing-key-canary"));
-    f.close(vec![binary]).await;
+    f.close(vec![replica]).await;
 }
 
 #[tokio::test]
-async fn real_binary_retries_a_failed_count_refresh_without_a_new_change() {
-    // Given a binary whose credential table is locked by a change that sends no notification.
+async fn retries_a_failed_count_refresh_without_a_new_change() {
+    // Given a replica whose credential table is locked by a change that sends no notification.
     let mut f = Fixture::new().await;
-    let binary = f.binary("", "").await;
-    let request = tokio::spawn(f.request(&binary, false).send());
+    let replica = f.in_process("", "");
+    let request = tokio::spawn(f.request(&replica, false).send());
     reply(f.hit().await, StatusCode::OK, "ok");
     assert_eq!(request.await.unwrap().unwrap().status(), StatusCode::OK);
     counts(
-        &scrape(&f, &binary, "retry-before", Some([2, 0, 0, 0])).await,
+        &scrape(&f, &replica, "retry-before", Some([2, 0, 0, 0])).await,
         [2, 0, 0, 0],
     );
     let mut tx = f.db.pool.begin().await.unwrap();
@@ -289,8 +289,8 @@ async fn real_binary_retries_a_failed_count_refresh_without_a_new_change() {
     tx.commit().await.unwrap();
     // Then a retry, not a notification, reports the committed change.
     counts(
-        &scrape(&f, &binary, "retry-after", Some([1, 1, 0, 0])).await,
+        &scrape(&f, &replica, "retry-after", Some([1, 1, 0, 0])).await,
         [1, 1, 0, 0],
     );
-    f.close(vec![binary]).await;
+    f.close(vec![replica]).await;
 }
