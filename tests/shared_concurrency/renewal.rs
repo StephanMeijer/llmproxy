@@ -19,7 +19,7 @@ async fn renewal_serializes_with_capacity_and_checks_expiry_after_lock_wait() {
     .await
     .unwrap();
     let mut holder = storage.begin().await.unwrap();
-    holder.lock_limit(&key).await.unwrap();
+    holder.lock_rates(&key).await.unwrap();
     // When renewal waits behind admission until the database row expires.
     let renewal = tokio::spawn({
         let storage = storage.clone();

@@ -206,7 +206,7 @@ async fn limit_commits_wake_only_waiters_on_the_same_limit() {
         let store = store.clone();
         async move {
             let mut tx = store.begin().await.unwrap();
-            tx.lock_limit(&key(person)).await.unwrap();
+            tx.lock_rates(&key(person)).await.unwrap();
             tx.commit().await.unwrap();
         }
     };
@@ -227,8 +227,8 @@ async fn limit_commits_wake_only_waiters_on_the_same_limit() {
         .unwrap();
     // When one transaction locks Bob's limit then Alice's, its commit still wakes Bob's waiter.
     let mut tx = store.begin().await.unwrap();
-    tx.lock_limit(&key(bob)).await.unwrap();
-    tx.lock_limit(&key(alice)).await.unwrap();
+    tx.lock_rates(&key(bob)).await.unwrap();
+    tx.lock_rates(&key(alice)).await.unwrap();
     tx.commit().await.unwrap();
     tokio::time::timeout(LONG, waiter.changed(LONG * 4))
         .await

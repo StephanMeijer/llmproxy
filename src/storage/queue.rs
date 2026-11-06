@@ -93,16 +93,6 @@ impl StorageTransaction {
         }
         Ok(changed)
     }
-
-    pub(super) async fn waiters(&mut self, key: &LimitKey) -> Result<Vec<Waiter>, StorageError> {
-        Ok(sqlx::query_as("SELECT id,owner,enqueue_order FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at>clock_timestamp() ORDER BY enqueue_order")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_all(&mut *self.tx).await?)
-    }
-
-    pub(super) async fn leases(&mut self, key: &LimitKey) -> Result<Vec<Lease>, StorageError> {
-        Ok(sqlx::query_as("SELECT id,owner FROM concurrency_leases WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at>clock_timestamp() ORDER BY id")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_all(&mut *self.tx).await?)
-    }
 }
 
 fn microseconds(duration: Duration) -> Result<i64, StorageError> {

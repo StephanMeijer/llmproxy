@@ -167,9 +167,10 @@ async fn repositories_reject_invalid_state_changes_and_report_conflicts() {
         Err(StorageError::Conflict)
     ));
     tx.rollback().await.unwrap();
-    let mut listener = ChangeListener::new(store.clone());
-    listener.limit(&key, SHORT).await.unwrap();
-    drop(listener);
+    // The stored definition survives the rejected conflicting one.
+    let mut tx = store.begin().await.unwrap();
+    tx.lock_rates(&key).await.unwrap();
+    tx.rollback().await.unwrap();
     let messages: std::collections::BTreeSet<String> = [
         StorageError::Unavailable,
         StorageError::IncompatibleSchema,
