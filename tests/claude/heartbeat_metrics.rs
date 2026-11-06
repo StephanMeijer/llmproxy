@@ -4,13 +4,13 @@ use super::{
 };
 use axum::body::Bytes;
 
-async fn availability(binary: &Binary, available: bool) {
+async fn availability(replica: &Replica, available: bool) {
     let expected = format!("llm3_postgres_available {}\n", u8::from(available));
     let client = reqwest::Client::new();
     tokio::time::timeout(WAIT, async {
         loop {
             let text = client
-                .get(&binary.metrics)
+                .get(&replica.metrics)
                 .send()
                 .await
                 .unwrap()
@@ -31,13 +31,11 @@ async fn availability(binary: &Binary, available: bool) {
 async fn heartbeat_observes_partition_and_recovery_without_another_authentication() {
     // Given an active native stream with a shared concurrency lease.
     let mut f = Fixture::new().await;
-    let binary = f
-        .binary(
-            "[[limit]]\nname='heartbeat'\nprefixes=['/claude/']\nmax_inflight=1\n",
-            "",
-        )
-        .await;
-    let request = tokio::spawn(f.request(&binary, false).send());
+    let replica = f.in_process(
+        "[[limit]]\nname='heartbeat'\nprefixes=['/claude/']\nmax_inflight=1\n",
+        "",
+    );
+    let request = tokio::spawn(f.request(&replica, false).send());
     let (send, dropped) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: first\n\n"))
         .await
@@ -46,13 +44,13 @@ async fn heartbeat_observes_partition_and_recovery_without_another_authenticatio
     assert_eq!(response.chunk().await.unwrap().unwrap(), "data: first\n\n");
     // When the database disappears and recovers while only metrics are scraped.
     connections(&f, false).await;
-    availability(&binary, false).await;
-    let text = scrape(&f, &binary, "heartbeat-outage", Some([2, 0, 0, 0])).await;
+    availability(&replica, false).await;
+    let text = scrape(&f, &replica, "heartbeat-outage", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     assert!(text.contains("llm3_http_requests_total{route=\"claude\",code=\"200\"} 1\n"));
     connections(&f, true).await;
-    availability(&binary, true).await;
-    let text = scrape(&f, &binary, "heartbeat-recovery", Some([2, 0, 0, 0])).await;
+    availability(&replica, true).await;
+    let text = scrape(&f, &replica, "heartbeat-recovery", Some([2, 0, 0, 0])).await;
     counts(&text, [2, 0, 0, 0]);
     // Then a successful renewal recovers availability and healthy fencing never marks an outage.
     send.send(Bytes::from_static(b"data: recovered\n\n"))
@@ -70,9 +68,9 @@ async fn heartbeat_observes_partition_and_recovery_without_another_authenticatio
     tokio::time::timeout(WAIT, dropped.notified())
         .await
         .unwrap();
-    let text = scrape(&f, &binary, "heartbeat-fenced", None).await;
+    let text = scrape(&f, &replica, "heartbeat-fenced", None).await;
     assert!(text.contains("llm3_postgres_available 1\n"));
     drop(response);
     drop(send);
-    f.close(vec![binary]).await;
+    f.close(vec![replica]).await;
 }

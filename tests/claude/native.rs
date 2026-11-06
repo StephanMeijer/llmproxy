@@ -11,7 +11,7 @@ use std::{
 
 #[tokio::test]
 async fn upstream_connection_failure_returns_502_and_releases_leases() {
-    // Given a configured provider listener that has stopped.
+    // Given a real binary whose log `close` scans for secrets after Bob succeeds, then gets a 401.
     let mut f = Fixture::new().await;
     let a = f
         .binary(
@@ -19,6 +19,12 @@ async fn upstream_connection_failure_returns_502_and_releases_leases() {
             "",
         )
         .await;
+    for status in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
+        let request = tokio::spawn(f.request(&a, true).send());
+        reply(f.hit().await, status, "bob");
+        assert_eq!(request.await.unwrap().unwrap().status(), status);
+    }
+    // And a configured provider listener that has stopped.
     f.stop_upstream().await;
     // When Claude attempts the upstream connection, with a query string the log must not keep.
     let response = reqwest::Client::new()
@@ -37,7 +43,7 @@ async fn upstream_connection_failure_returns_502_and_releases_leases() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     f.state_count("concurrency_leases", 0).await;
     // And the operator can see why in the log (the refused connection), as for static routes.
-    let log = std::fs::read_to_string(&a.log).unwrap();
+    let log = std::fs::read_to_string(a.log().unwrap()).unwrap();
     assert!(
         log.lines()
             .any(|line| line.contains("upstream request failed")
@@ -57,7 +63,7 @@ async fn upstream_connection_failure_returns_502_and_releases_leases() {
 async fn retry_beyond_deadline_preserves_provider_429_and_headers() {
     // Given a provider429 whose Retry-After exceeds the remaining request budget.
     let mut f = Fixture::new().await;
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     let request = tokio::spawn(f.request(&a, false).send());
     let hit = f.hit().await;
     let mut response = Response::new(Body::from("{\"error\":{\"type\":\"rate_limit_error\"}}"));
@@ -89,8 +95,8 @@ async fn two_replicas_preserve_bytes_tools_headers_and_person_credentials() {
     // Given two real replicas sharing encrypted Alice/Bob credentials.
     let container = crate::pg_dump::credential_container();
     let mut f = Fixture::new().await;
-    let a = f.binary("", "").await;
-    let b = f.binary("", "").await;
+    let a = f.in_process("", "");
+    let b = f.in_process("", "");
     // When each sends a native tool request with repeated beta headers and a hop header.
     let mut outgoing = f
         .request(&a, false)
@@ -153,7 +159,7 @@ async fn two_replicas_preserve_bytes_tools_headers_and_person_credentials() {
     }
     artifact(
         "native.txt",
-        "PASS two binary replicas, Alice/Bob key isolation, byte-exact tool JSON, native repeated beta/version headers, query, 201/status/usage/rate headers, hop and auth stripping\n",
+        "PASS two replicas, Alice/Bob key isolation, byte-exact tool JSON, native repeated beta/version headers, query, 201/status/usage/rate headers, hop and auth stripping\n",
     );
     let dump = crate::pg_dump::pg_dump(&container, &f.db.config.url);
     for secret in [
@@ -175,9 +181,9 @@ async fn two_replicas_preserve_bytes_tools_headers_and_person_credentials() {
 async fn curl_no_buffer_observes_sse_before_provider_completion() {
     const FIRST: &[u8] = b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\"}}\n\n";
     const LAST: &[u8] = b"event: future_event\ndata: {\"usage\":{\"output_tokens\":3}}\n\nevent: error\ndata: {\"error\":{\"type\":\"overloaded_error\"}}\n\n";
-    // Given a real binary and a provider that waits between native SSE chunks.
+    // Given a replica and a provider that waits between native SSE chunks.
     let mut f = Fixture::new().await;
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     let mut child = Command::new("curl")
         .args([
             "--silent",
@@ -241,7 +247,7 @@ async fn retry_429_charges_model_only_shared_budget_once() {
     // Given a model-only request budget of one and two replicas.
     let mut f = Fixture::new().await;
     let limits = "[[limit]]\nname='model'\nmodel='claude-test'\nrpm=1\nburst=1\n";
-    let a = f.binary(limits, "").await;
+    let a = f.in_process(limits, "");
     // When the provider asks for one retry.
     let request = tokio::spawn(f.request(&a, false).send());
     let hit = f.hit().await;
