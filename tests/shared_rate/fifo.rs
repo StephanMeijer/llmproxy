@@ -1,5 +1,6 @@
 use super::*;
 use llmproxy::{limit::shared::AdmissionStore, storage::ChangeListener};
+use std::time::Duration;
 
 #[tokio::test]
 async fn successful_commit_order_serializes_enqueue_and_rollback_reuses_counter() {
@@ -120,6 +121,58 @@ async fn reaping_a_stale_waiter_commits_while_the_live_waiter_keeps_waiting() {
     assert!(!waiter.is_finished());
     f.refill().await;
     tokio::time::timeout(LONG, waiter)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn a_head_waiting_for_budget_sleeps_instead_of_polling() {
+    // Given a drained request bucket, one waiter at the head of the queue, and a sequence that
+    // counts every reclaim statement whether or not its transaction commits.
+    let f = Fixture::new().await;
+    sqlx::raw_sql("CREATE SEQUENCE polls; CREATE FUNCTION count_poll() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('polls'); RETURN NULL; END $$; CREATE TRIGGER count_poll AFTER DELETE ON fifo_waiters FOR EACH STATEMENT EXECUTE FUNCTION count_poll()")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let d = definition("rpm=1");
+    let a = f.replica(false, Duration::from_mins(2));
+    a.acquire(charge(&d, f.alice, 1)).await.unwrap();
+    let (copy, alice) = (d.clone(), f.alice);
+    let head = tokio::spawn(async move { a.acquire(charge(&copy, alice, 1)).await });
+    f.waiters(1).await;
+    let polls = || async {
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM polls")
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap()
+    };
+    // When it is left alone for a while, counted from a poll after its enqueue: the poll right
+    // after enqueue and the one woken by the listener connecting may otherwise both land inside.
+    let enqueued = polls().await;
+    let before = tokio::time::timeout(LONG, async {
+        loop {
+            let now = polls().await;
+            if now > enqueued {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let after = polls().await;
+    // Then it polled at most twice, where a 250 ms poll would have run ten times.
+    assert!(after - before <= 2, "{} polls in 2.5 s", after - before);
+    // And a budget written without any notification is still seen within the blind wait.
+    sqlx::query("UPDATE rate_state SET updated_at=clock_timestamp()-interval '61 seconds'")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(LONG, head)
         .await
         .unwrap()
         .unwrap()
