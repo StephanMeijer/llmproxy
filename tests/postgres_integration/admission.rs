@@ -165,7 +165,7 @@ async fn aggregate_request_and_token_budgets_timeout_without_second_provider_hit
         let limits = format!("[[limit]]\nname='rate'\nprefixes=['/claude/']\n{quota}\n");
         let a = f.binary(&limits).await;
         let mut b = f.binary(&limits).await;
-        let config = b.config.clone();
+        let config = b.config();
         b.kill();
         let text = std::fs::read_to_string(&config)
             .unwrap()

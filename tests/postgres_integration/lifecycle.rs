@@ -55,7 +55,7 @@ async fn provisioning_rotation_restart_preserve_native_tools_and_sse() {
         None,
     );
     assert_eq!(rotated.get("rewritten").unwrap(), 2);
-    let config = a.config.clone();
+    let config = a.config();
     drop(a);
     let text = std::fs::read_to_string(&config)
         .unwrap()
@@ -86,10 +86,10 @@ async fn provisioning_rotation_restart_preserve_native_tools_and_sse() {
 
 #[tokio::test]
 async fn provider_errors_invalid_credentials_retry_and_replacement_are_isolated() {
-    // Given separate Alice and Bob credentials on two real replicas.
+    // Given separate Alice and Bob credentials on two in-process replicas.
     let mut f = Fixture::new("provider-errors").await;
-    let a = f.binary("").await;
-    let b = f.binary("").await;
+    let a = f.in_process("");
+    let b = f.in_process("");
     let mut clients = JoinSet::new();
     // When Alice's old generation fails after replacement, Bob retries a 429.
     clients.spawn(f.request(&a, 0).send());

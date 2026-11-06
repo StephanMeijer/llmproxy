@@ -1,5 +1,7 @@
 #[path = "../common/healthy.rs"]
 mod healthy;
+#[path = "../common/in_process.rs"]
+mod in_process;
 #[path = "../common/shutdown.rs"]
 mod shutdown;
 use std::{
@@ -9,15 +11,40 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
+/// One proxy replica: a spawned binary, or a `Proxy` served inside the test process.
 pub struct Replica {
-    child: Child,
     pub base: String,
-    pub config: PathBuf,
+    run: Run,
+}
+
+enum Run {
+    Binary { child: Child, config: PathBuf },
+    // Dropping it stops the proxy's runtime.
+    InProcess(#[expect(dead_code, reason = "held only to be dropped")] in_process::InProcess),
 }
 
 impl Replica {
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        match &self.run {
+            Run::Binary { child, .. } => child.id(),
+            Run::InProcess(_) => unreachable!("an in-process replica has no child process"),
+        }
+    }
+
+    pub fn config(&self) -> PathBuf {
+        match &self.run {
+            Run::Binary { config, .. } => config.clone(),
+            Run::InProcess(_) => unreachable!("an in-process replica has no config file"),
+        }
+    }
+
+    /// Serves a `Proxy` parsed from `text` inside the test process.
+    pub fn in_process(text: &str) -> Self {
+        let served = in_process::InProcess::start(text);
+        Self {
+            base: served.base.clone(),
+            run: Run::InProcess(served),
+        }
     }
 
     pub async fn start(config: &Path) -> Self {
@@ -36,24 +63,34 @@ impl Replica {
             .stderr(log)
             .spawn()
             .unwrap();
+        // Built first so a failed health check still stops the child on drop.
         let mut replica = Self {
-            child,
             base: format!("http://{address}"),
-            config: config.into(),
+            run: Run::Binary {
+                child,
+                config: config.into(),
+            },
         };
-        healthy::wait_healthy(&replica.base, &mut replica.child, super::WAIT).await;
+        if let Run::Binary { child, .. } = &mut replica.run {
+            healthy::wait_healthy(&replica.base, child, super::WAIT).await;
+        }
         replica
     }
 
     pub fn kill(&mut self) {
-        self.child.kill().unwrap();
-        self.child.wait().unwrap();
+        let Run::Binary { child, .. } = &mut self.run else {
+            unreachable!("an in-process replica has no child process")
+        };
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }
 
 impl Drop for Replica {
     fn drop(&mut self) {
-        shutdown::stop(&mut self.child);
+        if let Run::Binary { child, .. } = &mut self.run {
+            shutdown::stop(child);
+        }
     }
 }
 

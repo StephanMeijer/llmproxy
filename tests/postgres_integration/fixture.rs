@@ -98,6 +98,11 @@ impl Fixture {
         Replica::start(&path).await
     }
 
+    /// Serves a replica inside the test process, for tests that check nothing process-specific.
+    pub fn in_process(&self, limits: &str) -> Replica {
+        Replica::in_process(&self.config_text("127.0.0.1:0", limits))
+    }
+
     pub fn request(&self, replica: &Replica, person: usize) -> reqwest::RequestBuilder {
         reqwest::Client::new()
             .post(format!("{}/claude/v1/messages", replica.base))
