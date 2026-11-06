@@ -20,7 +20,7 @@ pub struct Replica {
 enum Run {
     Binary { child: Child, config: PathBuf },
     // Dropping it stops the proxy's runtime.
-    InProcess(#[expect(dead_code, reason = "held only to be dropped")] in_process::InProcess),
+    InProcess(in_process::InProcess),
 }
 
 impl Replica {
@@ -35,6 +35,14 @@ impl Replica {
         match &self.run {
             Run::Binary { config, .. } => config.clone(),
             Run::InProcess(_) => unreachable!("an in-process replica has no config file"),
+        }
+    }
+
+    /// What an in-process replica logged; a spawned one writes its log file instead.
+    pub fn captured_log(&self) -> Option<String> {
+        match &self.run {
+            Run::InProcess(served) => Some(String::from_utf8(served.log()).unwrap()),
+            Run::Binary { .. } => None,
         }
     }
 

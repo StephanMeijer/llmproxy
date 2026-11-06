@@ -174,19 +174,30 @@ impl Fixture {
         );
     }
 
-    /// Stops the replicas, then fails the test if any process log contains a secret.
+    /// Stops the replicas, then fails the test if a secret appears in any spawned replica's log
+    /// file or in what an in-process replica logged.
     pub fn close(mut self, replicas: Vec<Replica>) {
+        let captured: Vec<String> = replicas.iter().filter_map(Replica::captured_log).collect();
+        // Guards against scanning an empty capture: every test sends at least one request.
+        assert!(
+            captured.is_empty()
+                || captured
+                    .iter()
+                    .any(|log| log.contains("\"message\":\"request\"")),
+            "no in-process replica logged a request"
+        );
         drop(replicas);
-        for entry in fs::read_dir(&self.db.directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "log") {
-                let log = fs::read_to_string(path).unwrap();
-                for secret in [ALICE, BOB, REPLACEMENT]
-                    .into_iter()
-                    .chain(self.tokens.iter().map(String::as_str))
-                {
-                    assert!(!log.contains(secret), "secret leaked into process log");
-                }
+        let files = fs::read_dir(&self.db.directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "log"))
+            .map(|path| fs::read_to_string(path).unwrap());
+        for log in files.chain(captured) {
+            for secret in [ALICE, BOB, REPLACEMENT]
+                .into_iter()
+                .chain(self.tokens.iter().map(String::as_str))
+            {
+                assert!(!log.contains(secret), "secret leaked into replica log");
             }
         }
         self.closed = true;
