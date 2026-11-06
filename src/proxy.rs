@@ -362,9 +362,12 @@ impl Proxy {
         if let Some(twice) = routes.iter().find(|r| !seen.insert(&r.name)) {
             return Err(ConfigError(format!("route {}: defined twice", twice.name)));
         }
-        // No total timeout and no redirects: streams may run long, and a redirect would carry our credential elsewhere.
+        // No total timeout, so streams may run long; the idle timeout resets on every chunk, but
+        // frees a slot held by an upstream that went silent. No redirects: one would carry our
+        // credential elsewhere.
         let client = reqwest::Client::builder()
             .connect_timeout(config.connect_timeout)
+            .read_timeout(config.upstream_idle_timeout)
             .redirect(redirect::Policy::none())
             .build()
             .map_err(|e| ConfigError(format!("build http client: {e}")))?;
