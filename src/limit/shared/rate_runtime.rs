@@ -234,28 +234,15 @@ impl SharedRateStore {
     ) -> Result<Poll, SharedAdmissionError> {
         let started = Instant::now();
         let tx = self.storage.begin().await?;
-        let decided = match tx.try_admit(&queued.key, &fenced, charge).await {
-            Ok(decided) => decided,
-            Err(error) => {
-                // A failed commit can still have applied: release the slot it may have kept, as
-                // dropping a guard does. Releasing a lease that was never written changes nothing.
-                if charge.definition.max_inflight().is_some() {
-                    drop(LeaseGuard::start(
-                        self.storage.clone(),
-                        queued.key.clone(),
-                        fenced,
-                        started,
-                    ));
-                }
-                return Err(error.into());
-            }
-        };
-        Ok(match decided {
-            Admit::Admitted => {
-                queued.active = false;
+        Ok(match tx.try_admit(&queued.key, &fenced, charge).await? {
+            Admit::Admitted(tx) => {
+                // The guard exists before the commit: if the commit fails or is cancelled (even
+                // one that applied), dropping the guard releases the reserved slot.
                 let guard = charge.definition.max_inflight().map(|_| {
                     LeaseGuard::start(self.storage.clone(), queued.key.clone(), fenced, started)
                 });
+                tx.commit().await?;
+                queued.active = false;
                 Poll::Admitted(guard)
             }
             Admit::Expired => {

@@ -6,10 +6,11 @@ use super::{FencedLease, Lease, LimitKey, PreparedRates, StorageError, StorageTr
 use crate::limit::shared::SharedCharge;
 
 /// What one admission attempt decided. Each variant says how the transaction was finished.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Admit {
-    /// Budgets charged, concurrency reserved when capped, waiter removed; committed.
-    Admitted,
+    /// Budgets charged, concurrency reserved when capped, waiter removed, but **not committed**:
+    /// the caller starts its lease guard first and then commits, so a commit that fails or is
+    /// cancelled, even one that applied, still releases the reserved slot.
+    Admitted(StorageTransaction),
     /// The waiter's own row expired; it is removed and the transaction committed.
     Expired,
     /// Another waiter is ahead. Committed only when expired rows were reaped.
@@ -29,7 +30,7 @@ impl StorageTransaction {
     /// first step and kept): reap expired rows, check the waiter is still live, check it heads the
     /// FIFO queue, check every rate budget, reserve concurrency when capped, check liveness once
     /// more (database time keeps moving within the transaction), then charge the budgets and leave
-    /// the queue. Callers no longer compose these steps themselves.
+    /// the queue. Callers no longer compose these steps themselves; they only commit an admission.
     ///
     /// # Errors
     /// Returns a sanitized database error; the transaction is then dropped and rolls back.
@@ -71,8 +72,7 @@ impl StorageTransaction {
         }
         self.commit_rates(key, &states).await?;
         self.remove_waiter(key, &waiter).await?;
-        self.commit().await?;
-        Ok(Admit::Admitted)
+        Ok(Admit::Admitted(self))
     }
 
     /// Keeps a reap (and its wake-up notification) when one happened; otherwise changes nothing.
