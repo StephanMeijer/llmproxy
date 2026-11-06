@@ -41,6 +41,7 @@ fn expands_env_into_strings_and_applies_defaults() {
     assert_eq!(config.max_wait, Duration::from_mins(2));
     assert_eq!(config.connect_timeout, Duration::from_secs(10));
     assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    assert_eq!(config.upstream_idle_timeout, Duration::from_mins(10));
     assert_eq!(config.max_body, DEFAULT_MAX_BODY);
 }
 
@@ -136,11 +137,25 @@ fn empty_token_is_rejected() {
 #[test]
 fn durations_too_large_for_a_clock_are_rejected() {
     // Every request adds max_wait to Instant::now(); an unrepresentable sum would panic per request.
-    for field in ["max_wait", "connect_timeout", "shutdown_timeout"] {
+    for field in [
+        "max_wait",
+        "connect_timeout",
+        "shutdown_timeout",
+        "upstream_idle_timeout",
+    ] {
         let message = refused(&format!("{field} = \"18446744073709551615s\"\n"));
         assert!(message.contains(field), "{message}");
         assert!(message.contains("representable"), "{message}");
     }
+    // A zero idle timeout would cut every request before the upstream could answer.
+    let message = refused("upstream_idle_timeout = \"0s\"\n");
+    assert!(message.contains("upstream_idle_timeout"), "{message}");
+    let config = Config::parse(
+        &format!("{MINIMAL}upstream_idle_timeout = \"30s\"\n"),
+        lookup,
+    )
+    .unwrap();
+    assert_eq!(config.upstream_idle_timeout, Duration::from_secs(30));
     // Zero still means "never hold a request".
     let config = Config::parse(&format!("{MINIMAL}max_wait = \"0s\"\n"), lookup).unwrap();
     assert_eq!(config.max_wait, Duration::ZERO);

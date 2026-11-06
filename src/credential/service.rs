@@ -1,11 +1,37 @@
 use super::{CredentialRecord, CredentialState};
 use crate::{
-    secret::{CredentialContext, KeyRing, SecretBytes, credential_fingerprint},
+    config::CredentialEncryptionConfig,
+    secret::{self, CredentialContext, KeyRing, SecretBytes, SecretError, credential_fingerprint},
     storage::{PersonId, Storage, StorageError},
 };
+use std::fmt;
 
 #[path = "counts.rs"]
 mod counts;
+#[path = "rotation.rs"]
+mod rotation;
+pub use rotation::RotationCounts;
+
+/// Which key file could not be loaded; the message names the file, never its path or bytes.
+#[derive(Debug)]
+pub enum KeyLoadError {
+    Ring(SecretError),
+    Fingerprint(SecretError),
+}
+
+impl fmt::Display for KeyLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ring(error) => error.fmt(f),
+            Self::Fingerprint(SecretError::InvalidKey) => {
+                f.write_str("fingerprint key must contain exactly 32 bytes")
+            }
+            Self::Fingerprint(_) => f.write_str("fingerprint key unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for KeyLoadError {}
 
 /// Identity of a credential generation observed by an operator or admitted request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +70,21 @@ impl Credentials {
         tx.commit().await
     }
 
+    /// Reads the configured key ring and fingerprint key files once.
+    /// # Errors
+    /// Returns which key file is missing, unreadable or malformed.
+    pub fn open(
+        storage: Storage,
+        config: &CredentialEncryptionConfig,
+    ) -> Result<Self, KeyLoadError> {
+        let keys =
+            KeyRing::load(&config.active_key_id, &config.keys).map_err(KeyLoadError::Ring)?;
+        let fingerprint_key =
+            secret::key_file(&config.fingerprint_key_file).map_err(KeyLoadError::Fingerprint)?;
+        Ok(Self::new(storage, keys, fingerprint_key))
+    }
+
+    /// Builds from already loaded keys; production code uses [`Credentials::open`].
     /// Keep the fingerprint key stable across encryption-key rotations and replicas.
     #[must_use]
     pub const fn new(storage: Storage, keys: KeyRing, fingerprint_key: SecretBytes) -> Self {

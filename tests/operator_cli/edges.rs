@@ -124,3 +124,30 @@ async fn operator_reports_database_url_the_driver_rejects() {
     assert!(stderr.contains("error:"), "{stderr}");
     assert!(!stderr.contains("bogus"), "{stderr}");
 }
+
+#[tokio::test]
+async fn reencrypt_to_unknown_key_id_changes_no_rows() {
+    let op = Operator::new().await;
+    let alice = op.person("Alice");
+    op.ok(
+        &["auth", "claude", "set", &alice, "--credential-stdin"],
+        Some(ALICE_KEY),
+    );
+    let rows = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT row_to_json(c)::text FROM provider_credentials c ORDER BY person_id",
+        )
+        .fetch_all(&op.db.pool)
+        .await
+        .unwrap()
+    };
+    let before = rows().await;
+    let output = op.run(
+        &["auth", "credentials", "reencrypt", "--to", "absent"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(rows().await, before);
+    op.close().await;
+}

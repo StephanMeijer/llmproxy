@@ -2,12 +2,11 @@ use super::{PersonId, StorageError, StorageTransaction};
 use crate::secret::CredentialEnvelope;
 use sqlx::{Row, postgres::PgRow};
 
-#[path = "../credential/rotation.rs"]
-mod rotation;
 #[path = "../credential/service.rs"]
 mod service;
-pub use rotation::RotationCounts;
-pub use service::{CredentialSnapshot, CredentialVersion, Credentials};
+pub use service::{
+    CredentialSnapshot, CredentialVersion, Credentials, KeyLoadError, RotationCounts,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type, serde::Serialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]

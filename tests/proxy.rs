@@ -41,6 +41,8 @@ const UPSTREAM_KEY: &str = "upstream-key";
 const STREAM_PATH: &str = "/v1/stream";
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(20);
 const LIMITED_PATH: &str = "/v1/limited";
+/// The upstream accepts the request and never answers.
+const HANG_PATH: &str = "/v1/hang";
 const UPSTREAM_LIMITED_BODY: &str = r#"{"error":"upstream-rate-limited"}"#;
 
 type Chunks = mpsc::Receiver<Result<Bytes, Infallible>>;
@@ -79,6 +81,9 @@ async fn upstream_handler(State(up): State<Arc<Upstream>>, req: Request) -> Resp
             )
                 .into_response();
         }
+    }
+    if req.uri().path() == HANG_PATH {
+        return std::future::pending().await;
     }
     if req.uri().path() == STREAM_PATH {
         let mut rx = up.stream.lock().unwrap().take().unwrap();
@@ -122,6 +127,11 @@ async fn start() -> Harness {
 
 /// `extra_toml` is appended to the config, so it can add more `[[limit]]` tables.
 async fn start_with(max_wait: &str, extra_toml: &str) -> Harness {
+    start_with_top(max_wait, "", extra_toml).await
+}
+
+/// Like `start_with`, with `top_toml` placed among the top-level keys.
+async fn start_with_top(max_wait: &str, top_toml: &str, extra_toml: &str) -> Harness {
     let upstream = Arc::new(Upstream::default());
     let up_addr = serve(
         Router::new()
@@ -136,6 +146,7 @@ proxy_token = "{TOKEN}"
 max_wait = "{max_wait}"
 max_body = 1024
 tool_choice_prefix = "/albert/"
+{top_toml}
 
 [[route]]
 name = "minimax"
@@ -644,6 +655,47 @@ async fn inflight_slot_is_released_when_the_client_disconnects_mid_stream() {
         .expect("the slot leaked after the client disconnected")
         .unwrap();
     assert_eq!(second.status(), 200);
+}
+
+const IDLE_1S: &str = r#"upstream_idle_timeout = "1s""#;
+
+#[tokio::test]
+async fn an_upstream_that_goes_silent_mid_stream_ends_the_response_and_frees_the_slot() {
+    let h = start_with_top("5s", IDLE_1S, ONE_AT_A_TIME).await;
+    // The upstream sends one chunk and then nothing, without closing the body.
+    let (_tx, response) = open_stream(&h).await;
+    let second = spawn_second_request(&h);
+
+    // The idle timeout cuts the stream, so the client sees an error instead of waiting forever.
+    let rest = tokio::time::timeout(PATIENCE, response.text())
+        .await
+        .expect("the silent stream was never cut");
+    assert!(rest.is_err(), "a cut stream must not look complete");
+    let second = tokio::time::timeout(PATIENCE, second)
+        .await
+        .expect("the slot stayed held after the stream was cut")
+        .unwrap();
+    assert_eq!(second.status(), 200);
+}
+
+#[tokio::test]
+async fn an_upstream_that_never_answers_gets_502() {
+    let h = start_with_top("5s", IDLE_1S, "").await;
+    let started = Instant::now();
+    let response = h
+        .client
+        .get(format!("{}/minimax/hang", h.base))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 502);
+    assert_eq!(json_body(response).await["error"]["type"], "upstream_error");
+    assert!(
+        started.elapsed() < PATIENCE,
+        "gave up only after {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]

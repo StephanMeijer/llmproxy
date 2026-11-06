@@ -49,8 +49,9 @@ Any string value may contain `${VAR}`, filled in from the environment. An unset 
 | `metrics_listen` | none | Address for Prometheus metrics. No metrics listener when unset. |
 | `proxy_token` | required | Legacy shared token for static routes; cannot access Claude. |
 | `max_wait` | `"120s"` | Longest a request is held by a limit before `429`. Whole seconds, written like `"120s"`. Waiting for a personal-token verifier is separate and capped at the shorter of `max_wait` and 10 s. |
-| `connect_timeout` | `"10s"` | Upstream dial timeout. Reading a response is never cut off, so long streams are safe. |
+| `connect_timeout` | `"10s"` | Upstream dial timeout. |
 | `shutdown_timeout` | `"30s"` | Longest a `SIGTERM` or `SIGINT` drain waits for open requests before exiting anyway. Under Kubernetes, set `terminationGracePeriodSeconds` a few seconds longer than this, or the pod is killed mid-drain. |
+| `upstream_idle_timeout` | `"600s"` | Longest the upstream may send nothing, while waiting for the response headers or between body chunks. A stall before the headers gets `502`; a stall mid-body ends the response. It resets on every chunk, so a long stream that keeps sending is never cut off. Raise it for non-streaming requests that generate for longer than this. |
 | `max_body` | `16777216` | Largest request body in bytes. Larger gets `413`. |
 | `tool_choice_prefix` | none | See [tool_choice](#tool_choice-shim). |
 
@@ -116,7 +117,7 @@ Errors the proxy produces itself are JSON: `{"error": {"type": "...", "message":
 | 404 | `not_found` | No route matches. |
 | 413 | `body_too_large` | Body over `max_body` (or unreadable). |
 | 429 | `queue_timeout` | Held for `max_wait`, or no personal-token verifier freed up within the shorter of `max_wait` and 10 s. `Retry-After` is that wait in seconds. |
-| 502 | `upstream_error` | The upstream could not be reached. |
+| 502 | `upstream_error` | The upstream could not be reached, or sent no response headers within `upstream_idle_timeout`. |
 | 503 | `authentication_unavailable`, `adapter_unavailable` | PostgreSQL/schema/limit configuration unavailable, or Claude credential missing, invalid, removed or undecryptable. |
 
 Upstream statuses pass through, including Anthropic `400` validation errors; an Anthropic `401` invalidates that credential generation, so subsequent requests get `503` until the operator replaces it. An upstream `403` is passed through. Local queue exhaustion returns `429`; provider `429` follows the configured retry policy. A stream whose lease is lost after headers ends abruptly rather than changing its already-sent HTTP status.
@@ -140,7 +141,7 @@ Use PostgreSQL 16 or newer (CI and crash tests use 18). Configure `[postgres]`, 
 
 Use a migration role that owns the schema and can create/alter tables, indexes and sequences. Run migrations explicitly before serving; startup never migrates. Concurrent `db migrate` runs serialize on an advisory lock; a run that waits longer than `acquire_timeout` for it exits non-zero, naming the held lock. The runtime/operator role needs CONNECT on the database, USAGE on the schema, SELECT/INSERT/UPDATE/DELETE on application tables, sequence USAGE/SELECT, and SELECT on `_sqlx_migrations`, but no schema CREATE or DDL ownership. Apply grants after migrations and renew them for new objects. Tests additionally require CREATEDB and administrative privileges for fault injection; do not give those privileges to production replicas.
 
-Use `sslmode=verify-full` with a trusted server CA for production PostgreSQL connections. Encryption protects stored provider credentials, not all database metadata. Encrypt database volumes and backups separately; removed or re-encrypted secrets may remain in backups and WAL until their retention expires. Keep recoverable key backups under separate access control. Losing encryption keys loses credential access; losing the fingerprint key breaks stable credential fingerprints.
+Use `sslmode=verify-full` with a trusted server CA for production PostgreSQL connections. Encryption protects stored provider credentials, not all database metadata. Encrypt database volumes and backups separately; removed or re-encrypted secrets may remain in backups and WAL until their retention expires. Keep recoverable key backups under separate access control. Losing encryption keys loses credential access; losing the fingerprint key breaks stable credential fingerprints. Either loss also blocks `auth claude remove` and `auth credentials reencrypt`.
 
 Create separate random 32-byte binary files for the fingerprint key and each encryption master key, readable only by the service/operator. Do not use hex strings or put key bytes in TOML, argv, logs or Git. For example, on the operator host:
 
@@ -164,7 +165,7 @@ target/release/llmproxy auth claude status "$PERSON_ID"
 target/release/llmproxy auth person status "$PERSON_ID"
 ```
 
-`auth claude set` prompts without echo on a terminal and installs or replaces the key. For automation, `target/release/llmproxy auth claude set "$PERSON_ID" --credential-stdin < /run/secrets/anthropic-api-key` reads the secret from stdin. Status output is redacted stored metadata, not a decryption/readiness check. Create Bob and issue/install his credentials using the same sequence; tokens never select another person's key. To revoke one token use `auth token revoke <token_id>`; to disable all access for a person use `auth person disable <person_id>`; to remove a provider key use `auth claude remove <person_id>`.
+`auth claude set` prompts without echo on a terminal and installs or replaces the key. For automation, `target/release/llmproxy auth claude set "$PERSON_ID" --credential-stdin < /run/secrets/anthropic-api-key` reads the secret from stdin. Status output is redacted stored metadata, not a decryption/readiness check. Create Bob and issue/install his credentials using the same sequence; tokens never select another person's key. To revoke one token use `auth token revoke <token_id>`; to disable all access for a person use `auth person disable <person_id>`; to remove a provider key use `auth claude remove <person_id>`. `auth claude remove` and `auth credentials reencrypt` load the configured key files and the fingerprint key file, so they fail if any of them is unreadable.
 
 ### Two replicas and requests
 
@@ -203,7 +204,7 @@ target/release/llmproxy auth credentials reencrypt --to next
 
 The target ID must exist in the configured key ring. Re-run after interruption; the command reports `rewritten` and `remaining`. Once remaining is zero, all writers use the new active key, and old-backup recovery has been addressed, remove the old ID/file from replicas and restart them. Retain protected old keys for backups that still need them. Do not rotate the fingerprint key with this procedure: it must stay stable across replicas and encryption rotations.
 
-Exercise outages before rollout: with PostgreSQL stopped, legacy static requests must still work, while issued-token requests return `503`; after database recovery they resume. With a wrong encryption key or incompatible schema, Claude returns `503` and legacy static continues. Repair the schema using the matching migration release; never edit migration checksums to suppress a failure. After fixing key files restart the affected replicas, because key rings and initial key-loading failures are cached. `/healthz` remains `200` in these cases.
+Exercise outages before rollout: with PostgreSQL stopped, legacy static requests must still work, while issued-token requests return `503`; after database recovery they resume. With a wrong encryption key or incompatible schema, Claude returns `503` and legacy static continues. Repair the schema using the matching migration release; never edit migration checksums to suppress a failure. A key ring that loaded successfully is kept until restart, so after replacing a key that loaded but is wrong, or changing or rotating key files, restart the affected replicas. A key file that is missing, unreadable or malformed is retried on every Claude request, so repairing it needs no restart. `/healthz` remains `200` in these cases.
 
 ## Observability
 

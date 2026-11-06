@@ -17,10 +17,10 @@ mod queue;
 mod runtime;
 pub use credentials::{
     CredentialRecord, CredentialSnapshot, CredentialState, CredentialVersion, Credentials,
-    RotationCounts,
+    KeyLoadError, RotationCounts,
 };
 pub use leases::{FencedLease, LEASE_LIFETIME};
-pub use limits::{LimitKey, RateKind, RateState};
+pub use limits::{LimitKey, PreparedRates, RateKind, RateState};
 pub use listener::ChangeListener;
 pub use people::{Person, PersonId, TokenId, TokenRecord};
 pub use queue::{Lease, OwnerId, ReservationId, Waiter};

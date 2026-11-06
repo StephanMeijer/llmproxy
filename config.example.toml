@@ -7,7 +7,8 @@ metrics_listen = "0.0.0.0:9180"           # optional; omit to serve no metrics
 proxy_token = "${PROXY_TOKEN}"            # sent by clients as `Authorization: Bearer` or `x-api-key`
 max_wait = "120s"                         # a request held longer by a limit gets 429
 shutdown_timeout = "30s"                  # SIGTERM drain limit; open streams are closed after it
-connect_timeout = "10s"                   # upstream dial only; response reads are never cut
+connect_timeout = "10s"                   # upstream dial only
+upstream_idle_timeout = "600s"            # longest the upstream may send nothing; resets on every chunk
 max_body = 16777216                       # bytes; larger request bodies get 413
 tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" when tools are sent without one
 
@@ -29,7 +30,8 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 # keys = { primary = "/run/secrets/llmproxy-primary" } # mounted 32-byte master key; never inline key bytes
 # Both key files contain exactly 32 random binary bytes; keep fingerprint key stable.
 # Stage new encryption keys on all replicas before changing active_key_id/reencrypting.
-# Runtime keys are loaded once: restart replicas after key-file repairs or changes.
+# Runtime keys are kept after the first successful load: restart replicas after changing them.
+# A missing or malformed key file is retried on each Claude request, so repairing one needs no restart.
 #
 # [claude]                               # reserves /claude; do not add a static route named claude
 # upstream = "https://api.anthropic.com"  # default; normalized with a trailing slash

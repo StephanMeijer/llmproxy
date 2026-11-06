@@ -61,8 +61,11 @@ impl Fixture {
         )
         .await;
     }
+    /// Backdates every bucket by a minute and wakes the waiters, as a commit that changed the
+    /// limit would; admission sleeps for the budget it computed and no longer polls blindly for
+    /// a refill nobody announced.
     pub async fn refill(&self) {
-        sqlx::query("UPDATE rate_state SET updated_at=clock_timestamp()-interval '61 seconds'")
+        sqlx::raw_sql("UPDATE rate_state SET updated_at=clock_timestamp()-interval '61 seconds'; SELECT pg_notify('llmproxy_storage', '')")
             .execute(&self.db.pool)
             .await
             .unwrap();
