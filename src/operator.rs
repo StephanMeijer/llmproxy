@@ -64,8 +64,7 @@ impl<'a> Command<'a> {
             ["auth", "claude", "status", id] => {
                 Self::Claude(PersonId(Uuid::parse_str(id)?), Claude::Status)
             }
-            ["auth", "credentials", "reencrypt", "--to", target]
-            | ["credentials", "reencrypt", "--to", target] => Self::Reencrypt(target),
+            ["auth", "credentials", "reencrypt", "--to", target] => Self::Reencrypt(target),
             _ => return Err(super::help::USAGE.into()),
         })
     }
