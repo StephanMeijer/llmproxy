@@ -13,6 +13,8 @@ use serde::{Deserialize, Deserializer, de::Error as _};
 
 const DEFAULT_MAX_WAIT: Duration = Duration::from_mins(2);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Matches the Anthropic SDKs' default for non-streaming calls, which send nothing until done.
+const DEFAULT_UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 const DEFAULT_MAX_BODY: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const MAX_IDENTIFIER_LENGTH: usize = 63;
@@ -43,6 +45,12 @@ pub struct Config {
     pub max_wait: Duration,
     #[serde(default = "default_connect_timeout", deserialize_with = "seconds")]
     pub connect_timeout: Duration,
+    /// Longest the upstream may stay silent, before or between response chunks.
+    #[serde(
+        default = "default_upstream_idle_timeout",
+        deserialize_with = "seconds"
+    )]
+    pub upstream_idle_timeout: Duration,
     #[serde(default = "default_max_body")]
     pub max_body: usize,
     /// POST `<prefix>…/chat/completions` bodies with tools but no `tool_choice` get `"auto"`.
@@ -145,6 +153,10 @@ const fn default_connect_timeout() -> Duration {
     DEFAULT_CONNECT_TIMEOUT
 }
 
+const fn default_upstream_idle_timeout() -> Duration {
+    DEFAULT_UPSTREAM_IDLE_TIMEOUT
+}
+
 const fn default_retry_429() -> bool {
     true
 }
@@ -224,6 +236,12 @@ impl Config {
                     "{field} must be a representable duration"
                 )));
             }
+        }
+        // Zero would cut every request before the upstream could answer.
+        if self.upstream_idle_timeout.is_zero() || !representable(self.upstream_idle_timeout) {
+            return Err(ConfigError(
+                "upstream_idle_timeout must be a positive representable duration".into(),
+            ));
         }
         if let Some(postgres) = &self.postgres {
             postgres.validate()?;

@@ -49,7 +49,8 @@ Any string value may contain `${VAR}`, filled in from the environment. An unset 
 | `metrics_listen` | none | Address for Prometheus metrics. No metrics listener when unset. |
 | `proxy_token` | required | Legacy shared token for static routes; cannot access Claude. |
 | `max_wait` | `"120s"` | Longest a request is held by a limit before `429`. Whole seconds, written like `"120s"`. Waiting for a personal-token verifier is separate and capped at the shorter of `max_wait` and 10 s. |
-| `connect_timeout` | `"10s"` | Upstream dial timeout. Reading a response is never cut off, so long streams are safe. |
+| `connect_timeout` | `"10s"` | Upstream dial timeout. |
+| `upstream_idle_timeout` | `"600s"` | Longest the upstream may send nothing, while waiting for the response headers or between body chunks. A stall before the headers gets `502`; a stall mid-body ends the response. It resets on every chunk, so a long stream that keeps sending is never cut off. Raise it for non-streaming requests that generate for longer than this. |
 | `max_body` | `16777216` | Largest request body in bytes. Larger gets `413`. |
 | `tool_choice_prefix` | none | See [tool_choice](#tool_choice-shim). |
 
@@ -115,7 +116,7 @@ Errors the proxy produces itself are JSON: `{"error": {"type": "...", "message":
 | 404 | `not_found` | No route matches. |
 | 413 | `body_too_large` | Body over `max_body` (or unreadable). |
 | 429 | `queue_timeout` | Held for `max_wait`, or no personal-token verifier freed up within the shorter of `max_wait` and 10 s. `Retry-After` is that wait in seconds. |
-| 502 | `upstream_error` | The upstream could not be reached. |
+| 502 | `upstream_error` | The upstream could not be reached, or sent no response headers within `upstream_idle_timeout`. |
 | 503 | `authentication_unavailable`, `adapter_unavailable` | PostgreSQL/schema/limit configuration unavailable, or Claude credential missing, invalid, removed or undecryptable. |
 
 Upstream statuses pass through, including Anthropic `400` validation errors; an Anthropic `401` invalidates that credential generation, so subsequent requests get `503` until the operator replaces it. An upstream `403` is passed through. Local queue exhaustion returns `429`; provider `429` follows the configured retry policy. A stream whose lease is lost after headers ends abruptly rather than changing its already-sent HTTP status.
