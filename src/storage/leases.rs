@@ -25,8 +25,8 @@ impl FencedLease {
 }
 
 impl StorageTransaction {
-    /// Reserves capacity under the same definition lock as FIFO/rate admission.
-    /// The caller must check FIFO eligibility in this transaction before calling.
+    /// Reserves one concurrency slot when fewer than `maximum` live leases exist.
+    /// A building block of [`StorageTransaction::try_admit`], which calls it in the safe order.
     /// # Errors
     /// Returns a sanitized constraint, invalid maximum, or database failure.
     pub async fn acquire_concurrency(

@@ -8,6 +8,7 @@ use sqlx::{
 
 use crate::config::PostgresConfig;
 
+mod admit;
 mod credentials;
 mod leases;
 mod limits;
@@ -15,6 +16,7 @@ mod listener;
 mod people;
 mod queue;
 mod runtime;
+pub use admit::Admit;
 pub use credentials::{
     CredentialRecord, CredentialSnapshot, CredentialState, CredentialVersion, Credentials,
     KeyLoadError, RotationCounts,

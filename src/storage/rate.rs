@@ -13,7 +13,7 @@ pub enum PreparedRates {
 
 impl StorageTransaction {
     /// Computes charges under row locks without spending either budget, or how long the
-    /// slowest bucket needs. Commit only when the FIFO head and concurrency reservation both admit.
+    /// slowest bucket needs. A building block of [`StorageTransaction::try_admit`].
     /// # Errors
     /// Returns invalid accounting state or a sanitized database error.
     pub async fn prepare_rates(
