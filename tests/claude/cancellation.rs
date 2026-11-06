@@ -7,7 +7,7 @@ const LIMITS: &str = "[[limit]]\nname='first'\nprefixes=['/claude/']\nmax_inflig
 async fn earlier_lease_loss_cancels_later_limit_wait_before_upstream() {
     // Given a seeded second definition whose capacity is held by another owner.
     let mut f = Fixture::new().await;
-    let a = f.binary(LIMITS, "").await;
+    let a = f.in_process(LIMITS, "");
     let seed = tokio::spawn(f.request(&a, false).send());
     reply(f.hit().await, StatusCode::OK, "seed");
     seed.await.unwrap().unwrap().bytes().await.unwrap();
@@ -55,7 +55,7 @@ async fn earlier_lease_loss_cancels_later_limit_wait_before_upstream() {
 async fn lease_loss_cancels_retry_delay_without_another_provider_hit() {
     // Given a provider429 with retry delay longer than the next lease renewal.
     let mut f = Fixture::new().await;
-    let a = f.binary(LIMITS, "").await;
+    let a = f.in_process(LIMITS, "");
     let request = tokio::spawn(f.request(&a, false).send());
     let hit = f.hit().await;
     let mut response = axum::response::Response::new(axum::body::Body::from("retry"));
@@ -93,7 +93,7 @@ async fn either_lease_loss_cancels_wait_for_upstream_headers() {
     // Given two leases and an upstream holding response headers.
     for lost in ["first", "second"] {
         let mut f = Fixture::new().await;
-        let a = f.binary(LIMITS, "").await;
+        let a = f.in_process(LIMITS, "");
         let request = tokio::spawn(f.request(&a, false).send());
         let mut hit = f.hit().await;
         // When either lease is fenced out before its renewal.
@@ -125,7 +125,7 @@ async fn either_lease_loss_cancels_wait_for_upstream_headers() {
 async fn lease_loss_cancels_body_under_downstream_backpressure() {
     // Given a stream whose downstream does not consume its body.
     let mut f = Fixture::new().await;
-    let a = f.binary(LIMITS, "").await;
+    let a = f.in_process(LIMITS, "");
     let request = tokio::spawn(f.request(&a, false).send());
     let (send, dropped) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: first\n\n"))
@@ -149,7 +149,7 @@ async fn lease_loss_cancels_body_under_downstream_backpressure() {
     f.state_count("concurrency_leases", 0).await;
     drop(response);
     // The stalled downstream write only ends once the client socket closes, which needs this
-    // runtime polled; stopping the binary blocks it, so wait for the proxy to see the disconnect.
+    // runtime polled, so wait for the proxy to see the disconnect before closing.
     tokio::time::timeout(WAIT, async {
         while !reqwest::get(&a.metrics)
             .await
@@ -175,7 +175,7 @@ async fn lease_loss_cancels_body_under_downstream_backpressure() {
 async fn downstream_disconnect_releases_every_lease() {
     // Given a streaming response holding two concurrency definitions.
     let mut f = Fixture::new().await;
-    let a = f.binary(LIMITS, "").await;
+    let a = f.in_process(LIMITS, "");
     let request = tokio::spawn(f.request(&a, false).send());
     let (send, dropped) = stream(f.hit().await);
     send.send(Bytes::from_static(b"data: first\n\n"))

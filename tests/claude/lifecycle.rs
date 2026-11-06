@@ -6,7 +6,7 @@ use llmproxy::secret::SecretBytes;
 async fn database_outage_returns_503_while_legacy_static_remains_available() {
     // Given a running replica whose database connections will be denied and terminated.
     let mut f = Fixture::new().await;
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     let name = reqwest::Url::parse(&f.db.config.url)
         .unwrap()
         .path()
@@ -55,7 +55,7 @@ async fn database_outage_returns_503_while_legacy_static_remains_available() {
 async fn invalid_key_401_affects_later_requests_but_403_does_not() {
     // Given active Alice and Bob credentials.
     let mut f = Fixture::new().await;
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     // When Alice's provider rejects her key and Bob receives a forbidden response.
     for (bob, status) in [
         (false, StatusCode::UNAUTHORIZED),
@@ -91,7 +91,7 @@ async fn invalid_key_401_affects_later_requests_but_403_does_not() {
 async fn old_generation_401_cannot_invalidate_replacement() {
     // Given a request with an older credential snapshot held upstream.
     let mut f = Fixture::new().await;
-    let a = f.binary("", "").await;
+    let a = f.in_process("", "");
     let request = tokio::spawn(f.request(&a, false).send());
     let hit = f.hit().await;
     let replacement = b"fake-claude-replacement-task13";
@@ -126,7 +126,7 @@ async fn missing_removed_wrong_key_body_limit_and_route_safety_fail_before_upstr
     // Given valid identity and removed Alice credential.
     let f = Fixture::new().await;
     f.credentials.remove(f.alice_version).await.unwrap();
-    let a = f.binary("", "max_body=16").await;
+    let a = f.in_process("", "max_body=16");
     // When requests violate each boundary.
     let large = f.request(&a, false).send().await.unwrap();
     let removed = f.request(&a, false).body("{}").send().await.unwrap();
@@ -148,7 +148,7 @@ async fn missing_removed_wrong_key_body_limit_and_route_safety_fail_before_upstr
     assert_eq!(wrong_method.status(), StatusCode::NOT_FOUND);
     assert_eq!(wrong_path.status(), StatusCode::NOT_FOUND);
     std::fs::write(f.db.path.with_extension("key"), [7; 32]).unwrap();
-    let b = f.binary("", "").await;
+    let b = f.in_process("", "");
     assert_eq!(
         f.request(&b, true).send().await.unwrap().status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -178,18 +178,14 @@ async fn missing_removed_wrong_key_body_limit_and_route_safety_fail_before_upstr
 async fn conflicting_replica_returns_503_and_legacy_static_keeps_working() {
     // Given two replicas disagreeing on a shared definition.
     let mut f = Fixture::new().await;
-    let a = f
-        .binary(
-            "[[limit]]\nname='same'\nprefixes=['/claude/']\nmax_inflight=1\n",
-            "",
-        )
-        .await;
-    let b = f
-        .binary(
-            "[[limit]]\nname='same'\nprefixes=['/claude/']\nmax_inflight=2\n",
-            "",
-        )
-        .await;
+    let a = f.in_process(
+        "[[limit]]\nname='same'\nprefixes=['/claude/']\nmax_inflight=1\n",
+        "",
+    );
+    let b = f.in_process(
+        "[[limit]]\nname='same'\nprefixes=['/claude/']\nmax_inflight=2\n",
+        "",
+    );
     let initial = tokio::spawn(f.request(&a, false).send());
     reply(f.hit().await, StatusCode::OK, "initial");
     initial.await.unwrap().unwrap().bytes().await.unwrap();
