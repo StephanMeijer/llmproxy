@@ -47,7 +47,8 @@ impl Claude {
         let route = Route {
             name: "claude".into(),
             name_header: HeaderValue::from_static("claude"),
-            base: format!("{}/", claude.upstream.trim_end_matches('/')),
+            // `Config::validate` already normalised it with exactly one trailing slash added.
+            base: claude.upstream.clone(),
             prefix: "/claude/".into(),
             headers: Vec::new(),
             retry_429: claude.retry_429,

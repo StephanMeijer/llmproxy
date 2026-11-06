@@ -338,7 +338,8 @@ fn representable(duration: Duration) -> bool {
     Instant::now().checked_add(duration).is_some()
 }
 
-fn valid_identifier(value: &str) -> bool {
+/// 1–63 ASCII letters, digits, underscores or hyphens: namespaces and encryption key IDs.
+pub(crate) fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_LENGTH
         && value
