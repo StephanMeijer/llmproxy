@@ -1,4 +1,5 @@
 use super::{KEY_BYTES, SecretBytes, SecretError, key_file, random};
+use crate::config::valid_identifier;
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
@@ -9,7 +10,6 @@ use uuid::Uuid;
 
 const ENVELOPE_VERSION: u8 = 1;
 const NONCE_BYTES: usize = 12;
-const MAX_KEY_ID_BYTES: usize = 63;
 
 /// Authenticated ownership context; changes to any field invalidate decryption.
 pub struct CredentialContext<'a> {
@@ -52,13 +52,7 @@ impl KeyRing {
     /// Returns `InvalidKey` for malformed IDs/keys, or `UnknownKey` if active is absent.
     pub fn new(active: &str, keys: BTreeMap<String, SecretBytes>) -> Result<Self, SecretError> {
         for (id, key) in &keys {
-            if id.is_empty()
-                || id.len() > MAX_KEY_ID_BYTES
-                || !id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-                || key.expose().len() != KEY_BYTES
-            {
+            if !valid_identifier(id) || key.expose().len() != KEY_BYTES {
                 return Err(SecretError::InvalidKey);
             }
         }
