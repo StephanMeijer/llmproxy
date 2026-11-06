@@ -75,3 +75,30 @@ async fn try_admit_decides_head_capacity_budget_and_expiry_in_one_call() {
     f.waiters(1).await;
     f.close().await;
 }
+
+#[tokio::test]
+async fn a_failed_attempt_on_a_capped_limit_leaves_no_lease_behind() {
+    use llmproxy::limit::shared::AdmissionStore;
+    // Given a capped limit whose definition this process has already stored.
+    let f = Fixture::new().await;
+    let definition = definition("rpm=60\nburst=10\nmax_inflight=1");
+    let store = f.replica(false, LONG);
+    let charge = charge(&definition, f.alice, 0);
+    drop(store.acquire(charge).await.unwrap());
+    let leases = "SELECT count(*) FROM concurrency_leases";
+    super::eventually::count_eventually(&f.db.pool, leases, 0, LONG).await;
+    // When the attempt fails part-way, after the waiter is queued.
+    sqlx::query("ALTER TABLE rate_state RENAME TO rate_state_away")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    assert!(store.acquire(charge).await.is_err());
+    sqlx::query("ALTER TABLE rate_state_away RENAME TO rate_state")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    // Then no slot stays taken: the next request is admitted at once.
+    super::eventually::count_eventually(&f.db.pool, leases, 0, LONG).await;
+    drop(store.acquire(charge).await.unwrap());
+    f.close().await;
+}
