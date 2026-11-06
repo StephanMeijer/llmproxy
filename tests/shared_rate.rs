@@ -20,5 +20,7 @@ mod fifo;
 mod manual;
 #[path = "shared_rate/support.rs"]
 mod support;
+#[path = "shared_rate/try_admit.rs"]
+mod try_admit;
 
 use support::*;

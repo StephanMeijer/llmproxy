@@ -2,8 +2,8 @@ use super::{AdmissionStore, SharedCharge};
 use crate::{
     limit::shared::{LeaseGuard, SharedDefinition},
     storage::{
-        ChangeListener, FencedLease, Lease, LimitKey, OwnerId, PersonId, PreparedRates, RateState,
-        Storage, StorageError, StorageTransaction,
+        Admit, ChangeListener, FencedLease, Lease, LimitKey, OwnerId, PersonId, Storage,
+        StorageError,
     },
 };
 use std::{
@@ -223,18 +223,9 @@ enum Poll {
     Retry,
 }
 
-/// Commits only when a reap changed rows; otherwise rolls back without a notification.
-async fn settle(tx: StorageTransaction, reaped: bool) -> Result<(), StorageError> {
-    if reaped {
-        tx.commit().await
-    } else {
-        tx.rollback().await
-    }
-}
-
 impl SharedRateStore {
-    /// One transaction: reap, check liveness, and admit when this waiter is the head and
-    /// every budget and the concurrency cap allow it.
+    /// One admission attempt in one transaction; [`StorageTransaction::try_admit`] decides,
+    /// this decides how long to wait before the next attempt.
     async fn poll_once(
         &self,
         queued: &mut Queued,
@@ -242,63 +233,25 @@ impl SharedRateStore {
         fenced: FencedLease,
     ) -> Result<Poll, SharedAdmissionError> {
         let started = Instant::now();
-        let mut tx = self.storage.begin().await?;
-        let reaped = tx.reclaim(&queued.key).await?;
-        if !tx.waiter_live(&queued.key, &queued.reservation).await? {
-            tx.remove_waiter(&queued.key, &queued.reservation).await?;
-            tx.commit().await?;
-            queued.active = false;
-            return Ok(Poll::Expired);
-        }
-        let is_head = tx
-            .waiter_head(&queued.key)
-            .await?
-            .is_some_and(|head| head.id == fenced.id && head.owner == fenced.owner);
-        if !is_head {
-            settle(tx, reaped).await?;
-            return Ok(Poll::Wait(MAX_BLIND_WAIT));
-        }
-        let states = match tx.prepare_rates(&queued.key, charge).await? {
-            PreparedRates::Ready(states) => states,
-            PreparedRates::Wait(wait) => {
-                settle(tx, reaped).await?;
-                return Ok(Poll::Wait(wait.clamp(POLL_INTERVAL, MAX_BLIND_WAIT)));
+        let tx = self.storage.begin().await?;
+        Ok(match tx.try_admit(&queued.key, &fenced, charge).await? {
+            Admit::Admitted(tx) => {
+                // The guard exists before the commit: if the commit fails or is cancelled (even
+                // one that applied), dropping the guard releases the reserved slot.
+                let guard = charge.definition.max_inflight().map(|_| {
+                    LeaseGuard::start(self.storage.clone(), queued.key.clone(), fenced, started)
+                });
+                tx.commit().await?;
+                queued.active = false;
+                Poll::Admitted(guard)
             }
-        };
-        let concurrency = match charge.definition.max_inflight() {
-            Some(max) => tx.acquire_concurrency(&queued.key, &fenced, max).await?,
-            None => true,
-        };
-        if !concurrency {
-            settle(tx, reaped).await?;
-            return Ok(Poll::Wait(MAX_BLIND_WAIT));
-        }
-        self.admit(tx, queued, charge, fenced, &states, started)
-            .await
-    }
-
-    /// Spends the prepared budgets and leaves the queue, unless the waiter expired meanwhile.
-    async fn admit(
-        &self,
-        mut tx: StorageTransaction,
-        queued: &mut Queued,
-        charge: SharedCharge<'_>,
-        fenced: FencedLease,
-        states: &[RateState],
-        started: Instant,
-    ) -> Result<Poll, SharedAdmissionError> {
-        if !tx.waiter_live(&queued.key, &queued.reservation).await? {
-            tx.rollback().await?;
-            return Ok(Poll::Retry);
-        }
-        tx.commit_rates(&queued.key, states).await?;
-        tx.remove_waiter(&queued.key, &queued.reservation).await?;
-        let guard = charge
-            .definition
-            .max_inflight()
-            .map(|_| LeaseGuard::start(self.storage.clone(), queued.key.clone(), fenced, started));
-        tx.commit().await?;
-        queued.active = false;
-        Ok(Poll::Admitted(guard))
+            Admit::Expired => {
+                queued.active = false;
+                Poll::Expired
+            }
+            Admit::NotHead | Admit::AtCapacity => Poll::Wait(MAX_BLIND_WAIT),
+            Admit::Budget(wait) => Poll::Wait(wait.clamp(POLL_INTERVAL, MAX_BLIND_WAIT)),
+            Admit::Retry => Poll::Retry,
+        })
     }
 }
