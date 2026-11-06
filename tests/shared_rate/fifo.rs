@@ -44,7 +44,7 @@ async fn cancelled_head_and_missed_notify_advance_next_without_charge_leak() {
     tasks.spawn(async move { b.acquire(charge(&copy, alice, 1)).await });
     f.waiters(2).await;
     let mut listener = ChangeListener::new(f.second.clone());
-    listener.limit(&key(alice), SHORT).await.unwrap();
+    listener.changed(SHORT).await.unwrap();
     sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND query LIKE 'LISTEN%'").execute(&f.db.pool).await.unwrap();
     head.abort();
     f.waiters(1).await;
@@ -60,20 +60,16 @@ async fn cancelled_head_and_missed_notify_advance_next_without_charge_leak() {
         }
     }
     assert_eq!(admitted, 1);
-    let snapshot = match listener.limit(&key(alice), SHORT).await {
-        Ok(snapshot) => snapshot,
-        Err(_) => listener.limit(&key(alice), SHORT).await.unwrap(),
-    };
-    assert!(snapshot.waiters.is_empty());
-    assert!(
-        snapshot
-            .rates
-            .iter()
-            .all(|state| state.available_units == 0)
-    );
+    f.waiters(0).await;
+    let balances: Vec<i64> =
+        sqlx::query_scalar("SELECT available_units FROM rate_state WHERE person_id=$1")
+            .bind(alice)
+            .fetch_all(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(balances, [0, 0]);
     println!(
-        "cancelled head + terminated LISTEN: admitted={admitted}, waiters={}, both rate balances=0 after one refill",
-        snapshot.waiters.len()
+        "cancelled head + terminated LISTEN: admitted={admitted}, waiters=0, both rate balances=0 after one refill"
     );
     drop(listener);
     f.close().await;

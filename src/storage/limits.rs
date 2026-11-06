@@ -1,4 +1,4 @@
-use super::{Lease, PersonId, StorageError, StorageTransaction, Waiter};
+use super::{PersonId, StorageError, StorageTransaction};
 use crate::limit::shared::SharedDefinition;
 
 #[path = "rate.rs"]
@@ -22,14 +22,6 @@ pub struct RateState {
     pub kind: RateKind,
     pub available_units: i64,
     pub elapsed_microseconds: i64,
-}
-
-pub struct LimitSnapshot {
-    pub definition: Vec<u8>,
-    pub version: i64,
-    pub rates: Vec<RateState>,
-    pub waiters: Vec<Waiter>,
-    pub leases: Vec<Lease>,
 }
 
 impl StorageTransaction {
@@ -59,25 +51,6 @@ impl StorageTransaction {
         Ok(sqlx::query_scalar("WITH inserted AS (INSERT INTO limit_definitions(namespace,person_id,provider,name,config) VALUES ($1,$2,'anthropic',$3,$4) ON CONFLICT(namespace,person_id,provider,name) DO NOTHING RETURNING version) SELECT version FROM inserted UNION ALL SELECT version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND name=$3 LIMIT 1")
             .bind(&self.namespace).bind(key.person).bind(&key.name).bind(sqlx::types::Json(definition))
             .fetch_one(&mut *self.tx).await?)
-    }
-
-    /// Locks the definition before reading its rates and live reservations.
-    /// # Errors
-    /// Returns `NotFound`, malformed data, or a sanitized database error.
-    pub async fn lock_limit(&mut self, key: &LimitKey) -> Result<LimitSnapshot, StorageError> {
-        let (definition, version): (String, i64) = sqlx::query_as("SELECT config::text,version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND name=$3 FOR UPDATE")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_one(&mut *self.tx).await?;
-        self.mark_locked(key);
-        let rates = self.lock_rates(key).await?;
-        let waiters = self.waiters(key).await?;
-        let leases = self.leases(key).await?;
-        Ok(LimitSnapshot {
-            definition: definition.into_bytes(),
-            version,
-            rates,
-            waiters,
-            leases,
-        })
     }
 
     /// Locks the definition and its rate rows, reading only the rates admission needs.
