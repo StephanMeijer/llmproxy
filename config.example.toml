@@ -20,7 +20,7 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 # namespace = "llmproxy"                 # same on all cooperating replicas
 # max_connections = 10                   # per pool; budget across replicas and notification sessions
 # connect_timeout = "10s"                # positive whole seconds; default 10s
-# acquire_timeout = "10s"                # positive pool acquisition timeout; default 10s
+# acquire_timeout = "10s"                # positive pool acquisition and db migrate lock wait timeout; default 10s
 #
 # [credential_encryption]
 # fingerprint_key_file = "/run/secrets/llmproxy-fingerprint-key"

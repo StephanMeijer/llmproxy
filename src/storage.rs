@@ -119,8 +119,12 @@ pub async fn migrate(config: &PostgresConfig) -> Result<(), StorageError> {
         .map_err(|_| StorageError::Unavailable)?;
     check_server(&mut connection).await?;
     // Bound only the wait for another migrator; the migrations themselves keep the default.
+    // lock_timeout is an int in ms, so clamp longer configured timeouts to its maximum.
     sqlx::query("SELECT set_config('lock_timeout', $1, false)")
-        .bind(format!("{}ms", config.acquire_timeout.as_millis()))
+        .bind(format!(
+            "{}ms",
+            config.acquire_timeout.as_millis().min(i32::MAX as u128)
+        ))
         .execute(&mut connection)
         .await
         .map_err(|_| StorageError::MigrationFailed)?;

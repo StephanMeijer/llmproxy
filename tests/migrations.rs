@@ -1,6 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use llmproxy::storage::{self, StorageError};
+use llmproxy::{
+    config::PostgresConfig,
+    storage::{self, StorageError},
+};
 use sqlx::AssertSqlSafe;
 use std::{fs, process::Command, time::Duration};
 use uuid::Uuid;
@@ -57,7 +60,7 @@ async fn a_held_migration_lock_times_out_with_a_named_cause() {
         .execute(&mut *holder)
         .await
         .unwrap();
-    // The fixture's acquire_timeout bounds the wait.
+    // The CLI reads the test's config file, which omits acquire_timeout, so the 10s default bounds the wait.
     let blocked = Command::new(BIN)
         .args(["db", "migrate"])
         .arg(&db.path)
@@ -74,6 +77,20 @@ async fn a_held_migration_lock_times_out_with_a_named_cause() {
         .unwrap();
     drop(holder);
     storage::migrate(&db.config).await.unwrap();
+    db.close().await;
+}
+
+#[tokio::test]
+async fn an_acquire_timeout_beyond_lock_timeout_range_still_migrates() {
+    let db = Database::new().await;
+    let config = PostgresConfig {
+        url: db.config.url.clone(),
+        namespace: db.config.namespace.clone(),
+        max_connections: db.config.max_connections,
+        connect_timeout: db.config.connect_timeout,
+        acquire_timeout: Duration::from_hours(30 * 24),
+    };
+    storage::migrate(&config).await.unwrap();
     db.close().await;
 }
 
