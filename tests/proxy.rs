@@ -438,6 +438,38 @@ async fn refuses_paths_that_climb_out_of_the_upstream() {
 }
 
 #[tokio::test]
+async fn an_escaping_path_is_refused_before_it_waits_on_a_limit() {
+    let h = start_with("5s", "").await;
+    let slow = r#"{"model":"slow-model"}"#;
+    // Spend the only request the `slow` limit allows this minute.
+    let first = h
+        .post("/minimax/chat/completions", slow)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+
+    let started = Instant::now();
+    let mut socket = tokio::net::TcpStream::connect(h.addr).await.unwrap();
+    let request = format!(
+        "POST /minimax/../admin HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{slow}",
+        slow.len()
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    let mut reply = String::new();
+    socket.read_to_string(&mut reply).await.unwrap();
+    // Held on the limit it would have waited out max_wait and answered 429.
+    assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "answered after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(h.hits(), 1);
+}
+
+#[tokio::test]
 async fn streams_without_buffering() {
     let h = start().await;
     let (tx, rx) = mpsc::channel(4);

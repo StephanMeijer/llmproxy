@@ -26,15 +26,16 @@ use tokio::{
 };
 
 use crate::{
-    auth::{AuthError, Authenticator, MAX_VERIFY_WAIT, RouteKind},
-    config::{Config, ConfigError},
-    limit::Limits,
+    auth::{AuthError, Authenticator, MAX_VERIFY_WAIT, Principal, RouteKind},
+    claude::{self, Claude, Refused, Unavailable},
+    config::{Config, ConfigError, RouteConfig},
+    limit::{
+        Limits,
+        shared::{Admission, LeaseCancellations, LeaseGuard},
+    },
     metrics::StorageMetrics,
     storage::Storage,
 };
-
-#[path = "claude.rs"]
-mod claude;
 
 const HEALTH_PATH: &str = "/healthz";
 const METRICS_PATH: &str = "/metrics";
@@ -45,6 +46,8 @@ const BYTES_PER_TOKEN: usize = 4;
 /// Metric `route` labels for requests that matched no configured route.
 const LABEL_HEALTHZ: &str = "healthz";
 const LABEL_OTHER: &str = "other";
+/// The Claude adapter's route name, path prefix and metric label.
+const CLAUDE_ROUTE: &str = "claude";
 
 const HEADER_ROUTE: HeaderName = HeaderName::from_static("x-proxy-route");
 const HEADER_QUEUE_WAIT: HeaderName = HeaderName::from_static("x-proxy-queue-wait-ms");
@@ -328,7 +331,8 @@ impl Drop for Timed {
 
 pub struct Proxy {
     auth: Authenticator,
-    claude: Option<claude::Claude>,
+    /// The per-person Claude adapter and the route it forwards through.
+    claude: Option<(Claude, Route)>,
     max_wait: Duration,
     max_body: usize,
     tool_choice_prefix: Option<String>,
@@ -384,7 +388,19 @@ impl Proxy {
                 .map_or_else(Arc::default, |storage| Arc::clone(storage.metrics())),
             ..Metrics::default()
         };
-        let (claude, limits) = claude::Claude::configure(&config, storage.clone())?;
+        let (adapter, limits) = Claude::configure(&config, storage.clone())?;
+        let claude = match (adapter, &config.claude) {
+            (Some(adapter), Some(settings)) => Some((
+                adapter,
+                Route::new(&RouteConfig {
+                    name: CLAUDE_ROUTE.to_owned(),
+                    upstream: settings.upstream.clone(),
+                    headers: BTreeMap::new(),
+                    retry_429: settings.retry_429,
+                })?,
+            )),
+            _ => None,
+        };
         let auth = Authenticator::new(config.proxy_token, storage, config.max_wait);
         Ok(Self {
             auth,
@@ -426,7 +442,7 @@ impl Proxy {
         if kind == RouteKind::Claude {
             if parts.uri.path() != claude::MESSAGES_PATH || parts.method != Method::POST {
                 return (
-                    "claude",
+                    CLAUDE_ROUTE,
                     error(
                         StatusCode::NOT_FOUND,
                         "not_found",
@@ -434,8 +450,14 @@ impl Proxy {
                     ),
                 );
             }
-            if let Some(claude) = &self.claude {
-                return ("claude", claude.forward(self, &parts, body).await);
+            if let Some((adapter, route)) = &self.claude {
+                let rest = parts
+                    .uri
+                    .path()
+                    .get(route.prefix.len()..)
+                    .unwrap_or_default();
+                let response = self.forward(route, rest, &parts, body, Some(adapter)).await;
+                return (CLAUDE_ROUTE, response);
             }
         }
         let Some((route, rest)) = matched else {
@@ -448,10 +470,22 @@ impl Proxy {
                 ),
             );
         };
-        (&route.name, self.forward(route, rest, &parts, body).await)
+        (
+            &route.name,
+            self.forward(route, rest, &parts, body, None).await,
+        )
     }
 
-    async fn forward(&self, route: &Route, rest: &str, parts: &Parts, body: Body) -> Response {
+    /// The one forwarding pipeline. `claude` adds the person's key and shared admission; without
+    /// it the route's own headers and local limits apply.
+    async fn forward(
+        &self,
+        route: &Route,
+        rest: &str,
+        parts: &Parts,
+        body: Body,
+        claude: Option<&Claude>,
+    ) -> Response {
         let Ok(body) = to_bytes(body, self.max_body).await else {
             return error(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -459,22 +493,19 @@ impl Proxy {
                 "request body exceeds max_body or could not be read",
             );
         };
-        let (body, model) = self.inspect_body(parts, body);
-
-        let queued = Instant::now();
-        let deadline = queued + self.max_wait;
-        let held = self.limits.acquire(
-            parts.uri.path(),
-            model.as_deref(),
-            body.len() / BYTES_PER_TOKEN,
-        );
-        let waiting = Counted::new(&self.metrics.held);
-        let Ok(permits) = timeout(self.max_wait, held).await else {
-            return queue_timeout(self.max_wait);
+        // A credential problem answers 503 before the request queues.
+        let person = match claude {
+            Some(claude) => {
+                let principal = parts.extensions.get::<Principal>();
+                match claude.person(principal, self.max_wait).await {
+                    Ok(person) => Some(person),
+                    Err(Unavailable) => return adapter_unavailable(),
+                }
+            }
+            None => None,
         };
-        drop(waiting);
-        let queue_wait_ms = millis(queued.elapsed());
-
+        let (body, model) = self.inspect_body(parts, body, person.is_some());
+        // Checked before queueing, so an escaping path never waits on a limit.
         let Some(url) = upstream_url(route, rest, parts.uri.query()) else {
             return error(
                 StatusCode::BAD_REQUEST,
@@ -482,24 +513,77 @@ impl Proxy {
                 "path escapes the route's upstream",
             );
         };
+
+        let queued = Instant::now();
+        let waiting = Counted::new(&self.metrics.held);
+        let admitted = match &person {
+            None => {
+                let held = self.limits.acquire(
+                    parts.uri.path(),
+                    model.as_deref(),
+                    body.len() / BYTES_PER_TOKEN,
+                );
+                match timeout(self.max_wait, held).await {
+                    Ok(permits) => Admitted::Local(permits),
+                    Err(_) => return queue_timeout(self.max_wait),
+                }
+            }
+            Some(person) => match person.admit(model.as_deref(), body.len()).await {
+                Ok(admission) => Admitted::Shared(admission),
+                Err(Refused::QueueTimeout) => return queue_timeout(self.max_wait),
+                Err(Refused::Unavailable) => return adapter_unavailable(),
+            },
+        };
+        drop(waiting);
+        let queue_wait_ms = millis(queued.elapsed());
+
+        let mut headers = request_headers(parts, route);
+        if let Some(person) = &person {
+            headers.insert(API_KEY_HEADER, person.api_key());
+        }
         let outgoing = Outgoing {
             method: parts.method.clone(),
             url,
-            headers: request_headers(parts, route),
+            headers,
             body,
         };
-        match self.send_upstream(route, &outgoing, deadline).await {
-            Ok((upstream, retries)) => relay(route, upstream, queue_wait_ms, retries, permits),
-            Err(e) => {
+        let mut cancellation = admitted.cancellations();
+        let sent = cancellation
+            .run(self.send_upstream(route, &outgoing, queued + self.max_wait))
+            .await;
+        let (upstream, retries) = match sent {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
                 // Debug keeps the source chain (refused, DNS); without_url drops the client's query string.
                 tracing::warn!(route = route.name, error = ?e.without_url(), "upstream request failed");
-                error(
+                return error(
                     StatusCode::BAD_GATEWAY,
                     "upstream_error",
                     "upstream request failed",
-                )
+                );
             }
+            Err(_) => {
+                tracing::warn!(
+                    route = route.name,
+                    "concurrency lease lost during upstream request"
+                );
+                return adapter_unavailable();
+            }
+        };
+        if let Some(person) = &person
+            && upstream.status() == StatusCode::UNAUTHORIZED
+            && person.rejected(&mut cancellation).await.is_err()
+        {
+            return adapter_unavailable();
         }
+        relay(
+            route,
+            upstream.status(),
+            upstream.headers().clone(),
+            queue_wait_ms,
+            retries,
+            admitted.body(upstream),
+        )
     }
 
     /// Sends `outgoing`. On an upstream `429` it waits and resends until `deadline`, then hands back
@@ -547,8 +631,8 @@ impl Proxy {
     }
 
     /// Applies the `tool_choice` shim and reads the `model` the limits match on. The body is only
-    /// parsed when one of those needs it.
-    fn inspect_body(&self, parts: &Parts, body: Bytes) -> (Bytes, Option<String>) {
+    /// parsed when one of those needs it; shared limits may always match on the model.
+    fn inspect_body(&self, parts: &Parts, body: Bytes, shared: bool) -> (Bytes, Option<String>) {
         let path = parts.uri.path();
         let rewrite_tools = parts.method == Method::POST
             && path.ends_with(CHAT_COMPLETIONS_SUFFIX)
@@ -556,7 +640,7 @@ impl Proxy {
                 .tool_choice_prefix
                 .as_deref()
                 .is_some_and(|p| path.starts_with(p));
-        let parsed = (rewrite_tools || self.limits.by_model())
+        let parsed = (rewrite_tools || shared || self.limits.by_model())
             .then(|| serde_json::from_slice::<Value>(&body).ok())
             .flatten();
         let Some(mut json) = parsed else {
@@ -603,26 +687,32 @@ fn request_headers(parts: &Parts, route: &Route) -> HeaderMap {
     headers
 }
 
-/// Streams the upstream response back. The permits ride along in the stream, so a concurrency
-/// cap lasts until the body ends.
-fn relay(
-    route: &Route,
-    upstream: reqwest::Response,
-    queue_wait_ms: u64,
-    retries: u32,
-    permits: Vec<OwnedSemaphorePermit>,
-) -> Response {
-    relay_stream(
-        route,
-        upstream.status(),
-        upstream.headers().clone(),
-        queue_wait_ms,
-        retries,
-        upstream.bytes_stream().map(move |chunk| {
-            let _held = &permits;
-            chunk
-        }),
-    )
+/// What admission handed out: local semaphore permits or shared database leases. Either is
+/// held until the response body ends.
+enum Admitted {
+    Local(Vec<OwnedSemaphorePermit>),
+    Shared(Admission<Option<LeaseGuard>>),
+}
+
+impl Admitted {
+    /// Cancels the upstream work when a shared lease is lost; local permits are never lost.
+    fn cancellations(&self) -> LeaseCancellations {
+        match self {
+            Self::Local(_) => LeaseCancellations::new(&[]),
+            Self::Shared(admission) => LeaseCancellations::new(admission.leases()),
+        }
+    }
+
+    /// The upstream body, carrying the permits or leases so a concurrency cap lasts until it ends.
+    fn body(self, upstream: reqwest::Response) -> Body {
+        match self {
+            Self::Local(permits) => Body::from_stream(upstream.bytes_stream().map(move |chunk| {
+                let _held = &permits;
+                chunk
+            })),
+            Self::Shared(admission) => Body::from_stream(admission.stream(upstream.bytes_stream())),
+        }
+    }
 }
 
 fn hop_by_hop(headers: &HeaderMap, name: &HeaderName) -> bool {
@@ -635,18 +725,15 @@ fn hop_by_hop(headers: &HeaderMap, name: &HeaderName) -> bool {
             .any(|token| token.trim().eq_ignore_ascii_case(name.as_str()))
 }
 
-fn relay_stream<S, E>(
+/// Streams the upstream response back with its status, minus hop-by-hop headers, plus ours.
+fn relay(
     route: &Route,
     status: StatusCode,
     upstream_headers: HeaderMap,
     queue_wait_ms: u64,
     retries: u32,
-    stream: S,
-) -> Response
-where
-    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
+    body: Body,
+) -> Response {
     let blocked: Vec<_> = upstream_headers
         .keys()
         .filter(|name| hop_by_hop(&upstream_headers, name))
@@ -660,7 +747,7 @@ where
     headers.insert(HEADER_QUEUE_WAIT, HeaderValue::from(queue_wait_ms));
     headers.insert(HEADER_RETRIES, HeaderValue::from(retries));
 
-    let mut response = Response::new(Body::from_stream(stream));
+    let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
@@ -687,6 +774,14 @@ fn auth_failure(failure: AuthError, max_wait: Duration) -> Response {
         AuthError::Busy => return queue_timeout(max_wait.min(MAX_VERIFY_WAIT)),
     };
     error(failure.status(), kind, "proxy authentication failed")
+}
+
+fn adapter_unavailable() -> Response {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "adapter_unavailable",
+        "Claude adapter unavailable",
+    )
 }
 
 fn queue_timeout(max_wait: Duration) -> Response {
