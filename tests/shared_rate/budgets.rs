@@ -1,8 +1,9 @@
 use super::*;
 use llmproxy::{
     limit::shared::{AdmissionStore, PendingAdmission, SharedAdmissionError, SharedRequest},
-    storage::StorageError,
+    storage::{PreparedRates, StorageError},
 };
+use std::time::Duration;
 
 #[tokio::test]
 async fn aggregate_both_budgets_and_person_isolation_when_two_pools_admit() {
@@ -168,5 +169,29 @@ async fn cached_definition_is_put_again_when_its_row_disappears() {
         .await
         .unwrap();
     assert_eq!(rows, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn prepare_rates_reports_the_longest_bucket_wait() {
+    // Given both buckets drained by one admission.
+    let f = Fixture::new().await;
+    let d = definition("rpm=1\ntpm=60");
+    f.replica(false, SHORT)
+        .acquire(charge(&d, f.alice, 60))
+        .await
+        .unwrap();
+    // When the next charge needs 30 tokens and one request.
+    let mut tx = f.first.begin().await.unwrap();
+    let prepared = tx
+        .prepare_rates(&key(f.alice), charge(&d, f.alice, 30))
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    // Then the wait is the request bucket's full minute, not the token bucket's half.
+    assert!(
+        matches!(prepared, PreparedRates::Wait(wait) if wait > Duration::from_secs(59) && wait <= Duration::from_mins(1)),
+        "{prepared:?}"
+    );
     f.close().await;
 }

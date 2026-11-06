@@ -35,7 +35,7 @@ async fn later_limit_receives_remaining_database_deadline() {
             .await
             .is_err()
     );
-    sqlx::query("UPDATE rate_state SET updated_at=clock_timestamp()-interval '61 seconds' WHERE limit_name='first'").execute(&f.db.pool).await.unwrap();
+    sqlx::raw_sql("UPDATE rate_state SET updated_at=clock_timestamp()-interval '61 seconds' WHERE limit_name='first'; SELECT pg_notify('llmproxy_storage', '')").execute(&f.db.pool).await.unwrap();
     let second_expiry = tokio::time::timeout(LONG,async {
         loop {
             let expiry:Option<i64> = sqlx::query_scalar("SELECT (extract(epoch FROM expires_at)*1000000)::bigint FROM fifo_waiters WHERE limit_name='second'").fetch_optional(&f.db.pool).await.unwrap();

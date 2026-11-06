@@ -2,8 +2,8 @@ use super::{AdmissionStore, SharedCharge};
 use crate::{
     limit::shared::{LeaseGuard, SharedDefinition},
     storage::{
-        ChangeListener, FencedLease, Lease, LimitKey, OwnerId, PersonId, RateState, Storage,
-        StorageError, StorageTransaction,
+        ChangeListener, FencedLease, Lease, LimitKey, OwnerId, PersonId, PreparedRates, RateState,
+        Storage, StorageError, StorageTransaction,
     },
 };
 use std::{
@@ -15,7 +15,11 @@ use std::{
 use tokio::time::Instant;
 use uuid::Uuid;
 
+/// Shortest sleep between two polls of the same waiter.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Longest sleep without a hint: a budget written without a notification, or a missed hint, is
+/// seen within this. The `shared_rate` tests refill with a raw UPDATE and allow 5 s.
+const MAX_BLIND_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedAdmissionError {
@@ -194,9 +198,9 @@ impl AdmissionStore for SharedRateStore {
                         return Err(SharedAdmissionError::QueueTimeout(self.max_wait));
                     }
                     Poll::Retry => {}
-                    Poll::Wait => match listener.changed(POLL_INTERVAL).await {
+                    Poll::Wait(wait) => match listener.changed(wait).await {
                         Ok(()) => {}
-                        Err(StorageError::Unavailable) => tokio::time::sleep(POLL_INTERVAL).await,
+                        Err(StorageError::Unavailable) => tokio::time::sleep(wait).await,
                         Err(error) => return Err(error.into()),
                     },
                 }
@@ -213,8 +217,8 @@ enum Poll {
     Admitted(Option<LeaseGuard>),
     /// The waiter row expired: removed and committed; the caller reports the queue timeout.
     Expired,
-    /// Not admitted; reaps committed or rolled back. The caller waits for a hint first.
-    Wait,
+    /// Not admitted; reaps committed or rolled back. The caller waits for a hint, or this long.
+    Wait(Duration),
     /// Liveness lost between the head check and commit: rolled back, poll again at once.
     Retry,
 }
@@ -250,14 +254,16 @@ impl SharedRateStore {
             .waiter_head(&queued.key)
             .await?
             .is_some_and(|head| head.id == fenced.id && head.owner == fenced.owner);
-        let states = if is_head {
-            tx.prepare_rates(&queued.key, charge).await?
-        } else {
-            None
-        };
-        let Some(states) = states else {
+        if !is_head {
             settle(tx, reaped).await?;
-            return Ok(Poll::Wait);
+            return Ok(Poll::Wait(MAX_BLIND_WAIT));
+        }
+        let states = match tx.prepare_rates(&queued.key, charge).await? {
+            PreparedRates::Ready(states) => states,
+            PreparedRates::Wait(wait) => {
+                settle(tx, reaped).await?;
+                return Ok(Poll::Wait(wait.clamp(POLL_INTERVAL, MAX_BLIND_WAIT)));
+            }
         };
         let concurrency = match charge.definition.max_inflight() {
             Some(max) => tx.acquire_concurrency(&queued.key, &fenced, max).await?,
@@ -265,7 +271,7 @@ impl SharedRateStore {
         };
         if !concurrency {
             settle(tx, reaped).await?;
-            return Ok(Poll::Wait);
+            return Ok(Poll::Wait(MAX_BLIND_WAIT));
         }
         self.admit(tx, queued, charge, fenced, &states, started)
             .await

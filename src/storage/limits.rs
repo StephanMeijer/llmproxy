@@ -3,6 +3,7 @@ use crate::limit::shared::SharedDefinition;
 
 #[path = "rate.rs"]
 mod rate;
+pub use rate::PreparedRates;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LimitKey {
