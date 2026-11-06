@@ -1,17 +1,8 @@
-use llmproxy::secret::{self, SecretBytes, SecretError};
+use llmproxy::secret::SecretBytes;
 use std::io::{self, BufRead, IsTerminal, Read};
 use zeroize::Zeroizing;
 
 const MAX_CREDENTIAL_BYTES: usize = 4096;
-
-pub(super) fn fingerprint(
-    path: &std::path::Path,
-) -> Result<SecretBytes, Box<dyn std::error::Error + Send + Sync>> {
-    secret::key_file(path).map_err(|error| match error {
-        SecretError::InvalidKey => "fingerprint key must contain exactly 32 bytes".into(),
-        _ => "fingerprint key unavailable".into(),
-    })
-}
 
 pub(super) fn credential(
     from_stdin: bool,

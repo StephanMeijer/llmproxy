@@ -23,8 +23,9 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
     let old = config.keys.remove("old").unwrap();
     // When old-key absence and wrong old-key material prevent authentication.
     assert_eq!(
-        store
-            .reencrypt_credentials(&config, "new")
+        Credentials::open(store.clone(), &config)
+            .unwrap()
+            .reencrypt()
             .await
             .unwrap_err(),
         StorageError::Encryption
@@ -32,8 +33,9 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
     fs::write(&old, [7; 32]).unwrap();
     config.keys.insert("old".into(), old.clone());
     assert_eq!(
-        store
-            .reencrypt_credentials(&config, "new")
+        Credentials::open(store.clone(), &config)
+            .unwrap()
+            .reencrypt()
             .await
             .unwrap_err(),
         StorageError::Encryption
@@ -47,8 +49,9 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
     // Then restoring the correct old key rotates without reactivating the credential.
     fs::write(&old, [1; 32]).unwrap();
     assert_eq!(
-        store
-            .reencrypt_credentials(&config, "new")
+        Credentials::open(store.clone(), &config)
+            .unwrap()
+            .reencrypt()
             .await
             .unwrap()
             .rewritten,
@@ -63,7 +66,7 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
     assert_eq!(state.1, before.2);
     assert_eq!(key_references(&db, "old").await, 0);
     artifact("rotation-failure.txt", b"PASS: missing/wrong old key returns Unavailable without generation/ciphertext/fingerprint changes; corrected key rotates invalid row while preserving state/fingerprint\n");
-    for path in config.keys.values() {
+    for path in config.keys.values().chain([&config.fingerprint_key_file]) {
         fs::remove_file(path).unwrap();
     }
     store.close().await;

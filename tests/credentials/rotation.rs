@@ -20,8 +20,9 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     assert_eq!(key_references(&db, "old").await, 2);
     let config = encryption(&db);
     let text = format!(
-        "{}\n[credential_encryption]\nfingerprint_key_file = '/nonexistent/fingerprint'\nactive_key_id='new'\n[credential_encryption.keys]\nold='{}'\nnew='{}'\n",
+        "{}\n[credential_encryption]\nfingerprint_key_file = '{}'\nactive_key_id='new'\n[credential_encryption.keys]\nold='{}'\nnew='{}'\n",
         fs::read_to_string(&db.path).unwrap(),
+        config.fingerprint_key_file.display(),
         config.keys.get("old").unwrap().display(),
         config.keys.get("new").unwrap().display()
     );
@@ -63,7 +64,11 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     // Then only the new key is referenced, both secrets survive, and another run is a no-op.
     assert_eq!(key_references(&db, "old").await, 0);
     assert_eq!(key_references(&db, "new").await, 2);
-    let repeated = store.reencrypt_credentials(&config, "new").await.unwrap();
+    let repeated = Credentials::open(store.clone(), &config)
+        .unwrap()
+        .reencrypt()
+        .await
+        .unwrap();
     assert_eq!(repeated.rewritten, 0);
     assert_eq!(repeated.remaining, 0);
     let new_only = service(&store, ring("new", &[("new", 2)]));
@@ -85,7 +90,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     artifact("rotation-argv.bin", &argv);
     artifact("rotation-stdout.txt", &restarted.stdout);
     artifact("rotation.txt", b"PASS: killed real CLI after one commit with second row locked; restarted rewrites one remaining row; repeat rewrites zero; old references zero; new-only ring decrypts both rows; argv/stdout/stderr contain no seeded credential\n");
-    for path in config.keys.values() {
+    for path in config.keys.values().chain([&config.fingerprint_key_file]) {
         fs::remove_file(path).unwrap();
     }
     store.close().await;

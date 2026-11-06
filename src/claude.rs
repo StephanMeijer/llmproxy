@@ -11,7 +11,6 @@ use crate::{
         SharedDefinition, SharedRateStore, SharedRequest,
     },
     metrics::{CredentialOperation, CredentialOutcome, CredentialProvider, StorageMetrics},
-    secret::{self, KeyRing},
     storage::{CredentialVersion, Credentials, Storage, StorageError},
 };
 use std::sync::{Arc, OnceLock};
@@ -97,13 +96,10 @@ impl Claude {
         &self,
         max_wait: std::time::Duration,
     ) -> Option<(Credentials, SharedRateStore)> {
-        let encryption = &self.encryption;
-        let keys = KeyRing::load(&encryption.active_key_id, &encryption.keys).ok()?;
-        let fingerprint = secret::key_file(&encryption.fingerprint_key_file).ok()?;
-        let store = SharedRateStore::new(self.storage.clone(), max_wait);
+        let credentials = Credentials::open(self.storage.clone(), &self.encryption).ok()?;
         Some((
-            Credentials::new(self.storage.clone(), keys, fingerprint),
-            store,
+            credentials,
+            SharedRateStore::new(self.storage.clone(), max_wait),
         ))
     }
 

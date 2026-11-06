@@ -25,7 +25,7 @@ use llmproxy::{
     secret::{KeyRing, SecretBytes},
     storage::{self, Credentials, PersonId, Storage, StorageError},
 };
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs};
 use uuid::Uuid;
 
 const ALICE: &[u8] = b"fake-anthropic-alice-credential-6";
@@ -70,10 +70,12 @@ fn encryption(db: &database::Database) -> CredentialEncryptionConfig {
     let old = db.path.with_extension("old.key");
     let new = db.path.with_extension("new.key");
     fs::write(&old, [1; 32]).unwrap();
+    let fingerprint = db.path.with_extension("fingerprint.key");
     fs::write(&new, [2; 32]).unwrap();
+    fs::write(&fingerprint, [9; 32]).unwrap();
     CredentialEncryptionConfig {
         active_key_id: "new".into(),
-        fingerprint_key_file: PathBuf::from("/nonexistent/fingerprint"),
+        fingerprint_key_file: fingerprint,
         keys: BTreeMap::from([("old".into(), old), ("new".into(), new)]),
     }
 }

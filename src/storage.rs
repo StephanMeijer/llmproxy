@@ -17,7 +17,7 @@ mod queue;
 mod runtime;
 pub use credentials::{
     CredentialRecord, CredentialSnapshot, CredentialState, CredentialVersion, Credentials,
-    RotationCounts,
+    KeyLoadError, RotationCounts,
 };
 pub use leases::{FencedLease, LEASE_LIFETIME};
 pub use limits::{LimitKey, RateKind, RateState};
