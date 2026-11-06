@@ -30,12 +30,7 @@ async fn route_token_database_matrix_preserves_person_identity() {
         let auth = Authenticator::new(LEGACY.into(), Some(Storage::new(postgres).unwrap()), WAIT);
         let (base, _servers) = http::start(postgres).await;
         let client = reqwest::Client::new();
-        for route in [
-            RouteKind::Health,
-            RouteKind::Static,
-            RouteKind::Claude,
-            RouteKind::Unknown,
-        ] {
+        for route in [RouteKind::Static, RouteKind::Claude, RouteKind::Unknown] {
             for (name, token, identity) in [
                 ("missing", None, None),
                 ("legacy", Some(LEGACY), Some(Principal::LegacyStatic)),
@@ -69,22 +64,14 @@ async fn route_token_database_matrix_preserves_person_identity() {
                     "x-person-id",
                     HeaderValue::from_str(&fixture.bob_id.0.to_string()).unwrap(),
                 );
-                let expected = if route == RouteKind::Health {
-                    Ok(None)
-                } else if ["missing", "conflicting", "malformed"].contains(&name) {
+                let expected = if ["missing", "conflicting", "malformed"].contains(&name) {
                     Err(AuthError::Unauthorized)
-                } else if name == "legacy" {
-                    if route == RouteKind::Claude {
-                        Err(AuthError::Forbidden)
-                    } else {
-                        Ok(identity)
-                    }
-                } else if !available {
+                } else if name == "legacy" && route == RouteKind::Claude {
+                    Err(AuthError::Forbidden)
+                } else if !available && name != "legacy" {
                     Err(AuthError::Unavailable)
-                } else if identity.is_some() {
-                    Ok(identity)
                 } else {
-                    Err(AuthError::Unauthorized)
+                    identity.ok_or(AuthError::Unauthorized)
                 };
                 let actual = auth.authenticate(route, &headers).await;
                 assert_eq!(
@@ -92,7 +79,6 @@ async fn route_token_database_matrix_preserves_person_identity() {
                     "database={available} route={route:?} token={name}"
                 );
                 let (path, success) = match route {
-                    RouteKind::Health => ("/healthz", 200),
                     RouteKind::Static => ("/static/models", 200),
                     RouteKind::Claude => ("/claude/v1/messages", 503),
                     RouteKind::Unknown => ("/unknown", 404),
@@ -121,8 +107,21 @@ async fn route_token_database_matrix_preserves_person_identity() {
                 );
             }
         }
+        healthz_needs_no_authentication(&client, &base, fixture.alice.expose()).await;
     }
     fixture.close().await;
+}
+
+/// The proxy answers `/healthz` before authentication, whatever the token or database.
+async fn healthz_needs_no_authentication(client: &reqwest::Client, base: &str, person: &str) {
+    for token in [None, Some(LEGACY), Some(person), Some("malformed")] {
+        let mut request = client.get(format!("{base}/healthz"));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let status = request.send().await.unwrap().status().as_u16();
+        assert_eq!(status, 200, "healthz token={token:?}");
+    }
 }
 
 #[tokio::test]
@@ -141,7 +140,7 @@ async fn ambiguous_headers_fail_before_database_access() {
     ] {
         let expected =
             if headers == vec![("authorization", "Bearer legacy"), ("x-api-key", "legacy")] {
-                Ok(Some(Principal::LegacyStatic))
+                Ok(Principal::LegacyStatic)
             } else {
                 Err(AuthError::Unauthorized)
             };
@@ -208,7 +207,7 @@ async fn overlapping_person_tokens_wait_for_a_verifier_instead_of_failing() {
     .await;
     // Then every one is authenticated as its own person; none is told the database is down.
     for (n, (result, (_, person))) in results.into_iter().zip(requests).enumerate() {
-        assert_eq!(result, Ok(Some(Principal::Person(*person))), "request {n}");
+        assert_eq!(result, Ok(Principal::Person(*person)), "request {n}");
     }
     fixture.close().await;
 }

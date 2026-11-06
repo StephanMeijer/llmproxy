@@ -415,10 +415,9 @@ impl Proxy {
             RouteKind::Unknown
         };
         match self.auth.authenticate(kind, &parts.headers).await {
-            Ok(Some(principal)) => {
+            Ok(principal) => {
                 parts.extensions.insert(principal);
             }
-            Ok(None) => {}
             Err(failure) => return (LABEL_OTHER, auth_failure(failure, self.max_wait)),
         }
         if kind == RouteKind::Claude {
