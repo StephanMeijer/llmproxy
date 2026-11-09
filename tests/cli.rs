@@ -302,6 +302,20 @@ fn serves_without_a_metrics_listener_and_exits_cleanly_on_sigint() {
     remove_run_files(&path);
 }
 
+#[test]
+fn serving_warns_when_postgres_tls_is_explicitly_unverified() {
+    // Given a remote database allowed without certificate checks; the pool is lazy, so nothing dials it.
+    let postgres = "[postgres]\nurl = \"postgres://db.invalid/x\"\nnamespace = \"test\"\ninsecure_tls = true\n";
+    let path = write_config("insecure-tls", &config(0, postgres));
+    let mut server = spawn(&path, None);
+    bound(&mut server, &path, "listening");
+    signal(&server, "TERM");
+    assert!(wait_for_exit(&mut server).success());
+    let log = fs::read_to_string(path.with_extension("log")).unwrap();
+    remove_run_files(&path);
+    assert!(log.contains("not certificate-verified"), "{log}");
+}
+
 /// Serves one `/healthz` request with `RUST_LOG` set to `filter` (or unset) and returns the log.
 fn request_log(name: &str, filter: Option<&str>) -> String {
     let path = write_config(name, &config(0, ""));

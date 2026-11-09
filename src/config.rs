@@ -3,13 +3,15 @@
 use std::{
     collections::BTreeMap,
     env, fmt, fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, Instant},
 };
 
 use reqwest::Url;
 use serde::{Deserialize, Deserializer, de::Error as _};
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
 
 const DEFAULT_MAX_WAIT: Duration = Duration::from_mins(2);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,6 +85,9 @@ pub struct PostgresConfig {
     pub connect_timeout: Duration,
     #[serde(default = "default_connect_timeout", deserialize_with = "seconds")]
     pub acquire_timeout: Duration,
+    /// Allows a non-local host without `sslmode=verify-full`; serving logs a warning.
+    #[serde(default)]
+    pub insecure_tls: bool,
 }
 
 impl fmt::Debug for PostgresConfig {
@@ -93,6 +98,7 @@ impl fmt::Debug for PostgresConfig {
             .field("max_connections", &self.max_connections)
             .field("connect_timeout", &self.connect_timeout)
             .field("acquire_timeout", &self.acquire_timeout)
+            .field("insecure_tls", &self.insecure_tls)
             .finish()
     }
 }
@@ -297,6 +303,20 @@ impl Config {
 }
 
 impl PostgresConfig {
+    /// Whether the driver would connect to a non-local host without verifying its certificate and
+    /// name. Parsed like the runtime parses it, so `PGSSLMODE` and `PGHOST` count; a URL the driver
+    /// rejects is reported when storage is built instead.
+    #[must_use]
+    pub fn unverified_remote(&self) -> bool {
+        PgConnectOptions::from_str(&self.url).is_ok_and(|options| {
+            let host = options.get_host();
+            options.get_socket().is_none()
+                && host != "localhost"
+                && !IpAddr::from_str(host.trim_matches(['[', ']'])).is_ok_and(|ip| ip.is_loopback())
+                && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull)
+        })
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if !valid_identifier(&self.namespace) {
             return Err(ConfigError(
@@ -311,6 +331,12 @@ impl PostgresConfig {
         }) {
             return Err(ConfigError(
                 "postgres.url must be a postgres:// or postgresql:// URL with a host and no fragment"
+                    .into(),
+            ));
+        }
+        if self.unverified_remote() && !self.insecure_tls {
+            return Err(ConfigError(
+                "postgres.url must set sslmode=verify-full for a non-local host, or set postgres.insecure_tls = true"
                     .into(),
             ));
         }

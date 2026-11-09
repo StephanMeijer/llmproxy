@@ -89,6 +89,7 @@ async fn an_acquire_timeout_beyond_lock_timeout_range_still_migrates() {
         max_connections: db.config.max_connections,
         connect_timeout: db.config.connect_timeout,
         acquire_timeout: Duration::from_hours(30 * 24),
+        insecure_tls: false,
     };
     storage::migrate(&config).await.unwrap();
     db.close().await;

@@ -27,6 +27,7 @@ async fn acquire_timeout_above_postgres_int_max_still_connects() {
         max_connections: 1,
         connect_timeout: db.config.connect_timeout,
         acquire_timeout: Duration::from_millis(i32::MAX as u64 + 1),
+        insecure_tls: false,
     };
     // When the runtime pool opens a session.
     let wide = Storage::new(&config).unwrap();

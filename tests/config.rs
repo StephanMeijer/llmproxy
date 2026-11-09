@@ -506,6 +506,55 @@ fn postgres_rejects_bad_urls_pool_sizes_and_timeouts() {
 }
 
 #[test]
+fn postgres_requires_verified_tls_for_non_local_hosts() {
+    let config = |url: &str, extra: &str| {
+        format!(
+            "listen = \"127.0.0.1:0\"\nproxy_token = \"t\"\n[postgres]\nurl = \"{url}\"\nnamespace = \"test\"\n{extra}"
+        )
+    };
+    // Given a remote host whose certificate or name would go unchecked, it is refused.
+    for url in [
+        "postgres://db.internal/x",
+        "postgres://db.internal/x?sslmode=require",
+        "postgres://db.internal/x?sslmode=verify-ca",
+        "postgres://10.0.0.5/x?sslmode=disable",
+    ] {
+        let error = Config::parse(&config(url, ""), |_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("verify-full"), "{url}: {error}");
+    }
+    // A verified remote, an explicit opt-out, and local hosts are accepted.
+    for (url, extra) in [
+        ("postgres://db.internal/x?sslmode=verify-full", ""),
+        ("postgres://db.internal/x", "insecure_tls = true\n"),
+        ("postgres://localhost/x", ""),
+        ("postgres://127.0.0.1/x", ""),
+        ("postgres://[::1]/x", ""),
+        ("postgres://db.internal/x?host=/run/postgresql", ""),
+    ] {
+        assert!(
+            Config::parse(&config(url, extra), |_| None).is_ok(),
+            "{url}"
+        );
+    }
+}
+
+#[test]
+fn postgres_url_the_driver_rejects_is_left_to_storage() {
+    // Given a URL the driver cannot parse, the TLS check stays out of the way.
+    let postgres = llmproxy::config::PostgresConfig {
+        url: "postgres://db.internal/x?sslmode=bogus".into(),
+        namespace: "test".into(),
+        max_connections: 1,
+        connect_timeout: Duration::from_secs(1),
+        acquire_timeout: Duration::from_secs(1),
+        insecure_tls: false,
+    };
+    assert!(!postgres.unverified_remote());
+}
+
+#[test]
 fn claude_rejects_unsafe_or_malformed_upstreams() {
     for url in [
         "ftp://localhost",

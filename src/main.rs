@@ -54,6 +54,10 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = Config::load(&PathBuf::from(&path))?;
     let (listen, metrics_listen) = (config.listen, config.metrics_listen);
     let shutdown_timeout = config.shutdown_timeout;
+    let insecure_tls = config
+        .postgres
+        .as_ref()
+        .is_some_and(|postgres| postgres.insecure_tls && postgres.unverified_remote());
     let proxy = Arc::new(Proxy::new(config)?);
     if check_only {
         println!("{path}: ok");
@@ -69,6 +73,9 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         .json()
         .with_env_filter(filter)
         .init();
+    if insecure_tls {
+        tracing::warn!("PostgreSQL connection is not certificate-verified (postgres.insecure_tls)");
+    }
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|e| format!("bind {listen}: {e}"))?;

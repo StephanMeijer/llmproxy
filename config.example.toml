@@ -18,11 +18,12 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 # --check-config validates them offline, without connecting or reading the mounted key files.
 # Namespace and key IDs use 1–63 ASCII letters, digits, underscores or hyphens.
 # [postgres]
-# url = "${DATABASE_URL}"                # postgres:// or postgresql://; use sslmode=verify-full in production
+# url = "${DATABASE_URL}"                # postgres:// or postgresql://; non-local hosts require sslmode=verify-full
 # namespace = "llmproxy"                 # same on all cooperating replicas
 # max_connections = 10                   # per pool; budget across replicas and notification sessions
 # connect_timeout = "10s"                # positive whole seconds; default 10s
 # acquire_timeout = "10s"                # positive pool acquisition and db migrate lock wait timeout; default 10s
+# insecure_tls = false                   # true allows a non-local host without sslmode=verify-full (logs a warning)
 #
 # [credential_encryption]
 # fingerprint_key_file = "/run/secrets/llmproxy-fingerprint-key"
