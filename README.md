@@ -81,6 +81,26 @@ With the Claude adapter enabled, limits matching `/claude/` use PostgreSQL admis
 
 Definitions persist in PostgreSQL. Restarting all replicas with a changed definition under the same name does not overwrite a conflicting stored definition. There is no online limit migration command; retain compatible definitions until an explicit drained deployment/state migration has been planned.
 
+### Free-model pools: `[[pool]]`, `[[pool_provider]]`, `[[quota_domain]]`
+
+Validated by `--check-config` but **not served yet** ([#28](https://github.com/StephanMeijer/llmproxy/issues/28)). A pool fails over across free models and closes any route whose price is not proven zero by the provider's live catalog; see [`docs/pools.md`](docs/pools.md). With any of these sections present, the static route name `pools` is reserved.
+
+| Section | Key | Meaning |
+|---|---|---|
+| `[[pool_provider]]` | `name` | Unique identifier, referenced by routes and quota domains. |
+| | `upstream` | `http(s)` base URL without credentials, query or fragment. The catalog is `<upstream>/models`. |
+| | `headers` | As for `[[route]]`; also sent on catalog fetches. |
+| | `catalog` | How the catalog states prices: `openrouter` or `opencode`. |
+| `[[quota_domain]]` | `name`, `provider` | A budget shared by the routes on one provider account. |
+| | `rpm` | Requests per minute, positive. |
+| `[[pool]]` | `name` | Path `/pools/<name>/`. Needs at least one `[[pool.route]]`. |
+| `[[pool.route]]` | `priority` | Unique within the pool; the lowest is tried first. |
+| | `provider`, `model` | The provider and its model id. On an `openrouter` catalog provider, models under `openrouter/` (OpenRouter's own routers, such as `openrouter/free`) are refused. |
+| | `context`, `max_output` | Token limits, positive. |
+| | `capabilities` | Any of `tools`, `vision`, `schema`. |
+| | `endpoints` | At least one of `chat`, `responses`. |
+| | `quota` | A quota domain of the same provider. |
+
 ## Behaviour
 
 **Authentication.** `Authorization: Bearer <token>` or `x-api-key: <token>`. Legacy tokens are compared without short-circuiting on the first differing byte; personal tokens are verified against stored hashes, at most 4 at a time (one per CPU on smaller hosts); further personal-token requests queue in arrival order for up to 10 s (or `max_wait`, if shorter), then get `429`. Authentication runs before forwarding, so an unknown path without a token gets `401`, not `404`. Duplicate or conflicting authentication headers get `401`. `/healthz` needs no token.

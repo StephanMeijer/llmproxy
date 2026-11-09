@@ -13,6 +13,13 @@ use reqwest::Url;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 
+mod pool;
+
+pub use pool::{
+    Capability, Catalog, Endpoint, PoolConfig, PoolProviderConfig, PoolRouteConfig,
+    QuotaDomainConfig,
+};
+
 const DEFAULT_MAX_WAIT: Duration = Duration::from_mins(2);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Matches Kubernetes' default grace period; set `terminationGracePeriodSeconds` a few seconds
@@ -70,6 +77,12 @@ pub struct Config {
     pub routes: Vec<RouteConfig>,
     #[serde(default, rename = "limit")]
     pub limits: Vec<LimitConfig>,
+    #[serde(default, rename = "pool_provider")]
+    pub pool_providers: Vec<PoolProviderConfig>,
+    #[serde(default, rename = "quota_domain")]
+    pub quota_domains: Vec<QuotaDomainConfig>,
+    #[serde(default, rename = "pool")]
+    pub pools: Vec<PoolConfig>,
 }
 
 /// Shared state settings; parsing validates syntax without connecting to `PostgreSQL`.
@@ -277,27 +290,18 @@ impl Config {
                     "route claude: prefix /claude is reserved when [claude] is enabled".into(),
                 ));
             }
-            let upstream = Url::parse(&claude.upstream)
-                .ok()
-                .filter(|url| {
-                    matches!(url.scheme(), "http" | "https")
-                        && url.host().is_some()
-                        && url.username().is_empty()
-                        && url.password().is_none()
-                        && url.query().is_none()
-                        && url.fragment().is_none()
-                })
-                .ok_or_else(|| {
-                    ConfigError(
-                        "claude.upstream must be an http(s) URL without credentials, query or fragment"
-                            .into(),
-                    )
-                })?;
+            let upstream = http_upstream(&claude.upstream).ok_or_else(|| {
+                ConfigError(
+                    "claude.upstream must be an http(s) URL without credentials, query or fragment"
+                        .into(),
+                )
+            })?;
             claude.upstream = upstream.to_string();
             if !claude.upstream.ends_with('/') {
                 claude.upstream.push('/');
             }
         }
+        pool::validate(self)?;
         Ok(())
     }
 }
@@ -387,6 +391,18 @@ impl CredentialEncryptionConfig {
         }
         Ok(())
     }
+}
+
+/// An http(s) URL with a host and no credentials, query or fragment: adapter and pool upstreams.
+fn http_upstream(text: &str) -> Option<Url> {
+    Url::parse(text).ok().filter(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
 }
 
 /// Whether `duration` can be added to the current instant without overflowing.

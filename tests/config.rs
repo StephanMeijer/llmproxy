@@ -638,3 +638,179 @@ fn check_config_accepts_offline_adapter_and_rejects_reserved_prefix() -> Result<
     }
     Ok(())
 }
+
+const POOL: &str = "[[pool_provider]]\nname = \"or\"\nupstream = \"https://openrouter.ai/api/v1\"\n\
+    headers = { Authorization = \"Bearer k\", X-Api-Key = \"\" }\ncatalog = \"openrouter\"\n\
+    [[pool_provider]]\nname = \"oc\"\nupstream = \"https://opencode.ai/zen/v1\"\ncatalog = \"opencode\"\n\
+    [[quota_domain]]\nname = \"or-free\"\nprovider = \"or\"\nrpm = 20\n\
+    [[quota_domain]]\nname = \"oc-free\"\nprovider = \"oc\"\nrpm = 30\n\
+    [[pool]]\nname = \"free\"\n\
+    [[pool.route]]\npriority = 1\nprovider = \"or\"\nmodel = \"liquid/lfm-3-1.7b:free\"\n\
+    context = 262144\nmax_output = 8192\ncapabilities = [\"tools\", \"schema\"]\n\
+    endpoints = [\"chat\", \"responses\"]\nquota = \"or-free\"\n\
+    [[pool.route]]\npriority = 2\nprovider = \"oc\"\nmodel = \"big-pickle\"\n\
+    context = 200000\nmax_output = 32000\nendpoints = [\"chat\"]\nquota = \"oc-free\"\n";
+
+#[test]
+fn accepts_a_valid_pool() {
+    let config = Config::parse(&format!("{MINIMAL}{POOL}"), lookup).unwrap();
+    assert_eq!(config.pool_providers.len(), 2);
+    assert_eq!(config.quota_domains.len(), 2);
+    assert_eq!(config.pools.first().map(|p| p.routes.len()), Some(2));
+    Proxy::new(config).unwrap();
+}
+
+#[test]
+fn refuses_invalid_pools() {
+    let provider =
+        "[[pool_provider]]\nname = \"or\"\nupstream = \"https://h\"\ncatalog = \"opencode\"\n";
+    let quota = "[[quota_domain]]\nname = \"q\"\nprovider = \"or\"\nrpm = 1\n";
+    let pool = "[[pool]]\nname = \"p\"\n";
+    for (edit, expected) in [
+        // (text replaced in POOL, or appended when the first field is empty), expected message
+        (
+            ("", "[[route]]\nname = \"pools\"\nupstream = \"http://h\"\n"),
+            "prefix /pools is reserved",
+        ),
+        (("", provider), "pool_provider or: defined twice"),
+        (
+            ("name = \"oc\"", "name = \"o c\""),
+            "pool_provider \"o c\": name must contain",
+        ),
+        (
+            ("", &format!("{quota}{quota}")),
+            "quota_domain q: defined twice",
+        ),
+        (("", &format!("{pool}{pool}")), "pool p: defined twice"),
+        (("", pool), "pool p: needs at least one route"),
+        (
+            ("https://opencode.ai/zen/v1", "ftp://h"),
+            "pool_provider oc: upstream must be",
+        ),
+        (
+            ("https://opencode.ai/zen/v1", "https://u:p@h"),
+            "pool_provider oc: upstream must be",
+        ),
+        (
+            ("X-Api-Key = \"\"", "\"X Bad\" = \"\""),
+            "header X Bad: invalid name",
+        ),
+        (
+            ("Bearer k", "line\\nbreak"),
+            "header Authorization: invalid value",
+        ),
+        (
+            (
+                "provider = \"oc\"\nrpm = 30",
+                "provider = \"nope\"\nrpm = 30",
+            ),
+            "quota_domain oc-free: unknown provider nope",
+        ),
+        (
+            ("rpm = 30", "rpm = 0"),
+            "quota_domain oc-free: rpm must be positive",
+        ),
+        (
+            ("priority = 2", "priority = 1"),
+            "pool free route 1: priority used twice",
+        ),
+        (
+            (
+                "priority = 2\nprovider = \"oc\"",
+                "priority = 2\nprovider = \"nope\"",
+            ),
+            "route 2: unknown provider nope",
+        ),
+        (
+            ("quota = \"oc-free\"", "quota = \"nope\""),
+            "route 2: unknown quota_domain nope",
+        ),
+        (
+            ("quota = \"oc-free\"", "quota = \"or-free\""),
+            "route 2: quota_domain or-free belongs to provider or",
+        ),
+        (
+            ("model = \"big-pickle\"", "model = \" \""),
+            "route 2: model must not be empty",
+        ),
+        (
+            (
+                "model = \"liquid/lfm-3-1.7b:free\"",
+                "model = \"openrouter/free\"",
+            ),
+            "route 1: openrouter/free is an OpenRouter router that picks its own model",
+        ),
+        (
+            ("context = 200000", "context = 0"),
+            "route 2: context and max_output must be positive",
+        ),
+        (
+            ("max_output = 32000", "max_output = 0"),
+            "route 2: context and max_output must be positive",
+        ),
+        (
+            ("endpoints = [\"chat\"]", "endpoints = []"),
+            "route 2: endpoints must not be empty",
+        ),
+    ] {
+        let (from, to) = edit;
+        let text = if from.is_empty() {
+            format!("{POOL}{to}")
+        } else {
+            assert!(POOL.contains(from), "{from}");
+            POOL.replacen(from, to, 1)
+        };
+        let why = refused(&text);
+        assert!(why.contains(expected), "{expected:?}: {why}");
+    }
+}
+
+#[test]
+fn every_openrouter_namespace_model_is_refused() {
+    for model in ["openrouter/auto", "openrouter/anything"] {
+        let text = POOL.replacen(
+            "model = \"liquid/lfm-3-1.7b:free\"",
+            &format!("model = \"{model}\""),
+            1,
+        );
+        let why = refused(&text);
+        assert!(
+            why.contains(&format!("route 1: {model} is an OpenRouter router")),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn opencode_meta_router_names_are_ordinary_models() {
+    // Only OpenRouter's catalog has meta-routers; the same name elsewhere is just a model.
+    let text = POOL.replacen("model = \"big-pickle\"", "model = \"openrouter/free\"", 1);
+    Config::parse(&format!("{MINIMAL}{text}"), lookup).unwrap();
+}
+
+#[test]
+fn pool_unknown_fields_values_and_missing_quota_are_rejected() {
+    for (from, to, expected) in [
+        (
+            "catalog = \"opencode\"",
+            "catalog = \"albert\"",
+            "check field names and types",
+        ),
+        (
+            "capabilities = [\"tools\", \"schema\"]",
+            "capabilities = [\"audio\"]",
+            "check field names and types",
+        ),
+        (
+            "endpoints = [\"chat\"]",
+            "endpoints = [\"embeddings\"]",
+            "check field names and types",
+        ),
+        ("rpm = 30", "rpm = 30\nburst = 5", "unknown field `burst`"),
+        ("\nquota = \"oc-free\"", "", "missing field `quota`"),
+    ] {
+        assert!(POOL.contains(from), "{from}");
+        let why = refused(&POOL.replacen(from, to, 1));
+        assert!(why.contains(expected), "{expected:?}: {why}");
+    }
+}
