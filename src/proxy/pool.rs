@@ -406,6 +406,11 @@ impl Pools {
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
             );
+            // The charge meter reads plain bytes; reqwest decompresses nothing.
+            headers.insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("identity"),
+            );
             let sent = proxy
                 .client
                 .post(format!("{}{rest}", provider.base))

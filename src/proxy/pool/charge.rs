@@ -65,21 +65,26 @@ impl Charge {
     }
 }
 
-/// Whether a JSON body or SSE `data:` line has a `cost`, top level or in `usage`, above zero.
+/// Whether a JSON body or SSE `data:` line has a `cost` above zero: top level, in `usage`, or
+/// in `response.usage` (a streamed `/responses` `response.completed` event).
 fn costs(line: &[u8]) -> bool {
     let line = line.trim_ascii();
     let line = line.strip_prefix(b"data:").unwrap_or(line);
     let Ok(value) = serde_json::from_slice::<Value>(line) else {
         return false;
     };
-    [value.pointer("/usage/cost"), value.get("cost")]
-        .into_iter()
-        .flatten()
-        .any(|cost| match cost {
-            Value::Number(n) => n.as_f64().is_some_and(|n| n > 0.0),
-            Value::String(s) => s.trim().parse::<f64>().is_ok_and(|n| n > 0.0),
-            _ => false,
-        })
+    [
+        value.pointer("/usage/cost"),
+        value.pointer("/response/usage/cost"),
+        value.get("cost"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|cost| match cost {
+        Value::Number(n) => n.as_f64().is_some_and(|n| n > 0.0),
+        Value::String(s) => s.trim().parse::<f64>().is_ok_and(|n| n > 0.0),
+        _ => false,
+    })
 }
 
 #[cfg(test)]
@@ -103,6 +108,11 @@ mod tests {
             b"data: [DONE]",
         ];
         assert_eq!(hits(true, sse), 1);
+        let completed: &[&[u8]] = &[
+            b"event: response.completed\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"cost\":0.5}}}\n\n",
+        ];
+        assert_eq!(hits(true, completed), 1);
         // A last line without its newline is read at the end.
         assert_eq!(hits(true, &[br#"data: {"cost":"3"}"#]), 1);
     }

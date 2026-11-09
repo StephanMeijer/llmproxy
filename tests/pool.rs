@@ -18,7 +18,7 @@ use axum::{
     extract::{Request, State},
     http::{
         StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
+        header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
     },
     response::{IntoResponse, Response},
 };
@@ -58,6 +58,8 @@ struct Fake {
     seen: Seen,
     /// Statuses the next completions of a kind answer with before plain `200`s.
     script: Arc<Mutex<BTreeMap<String, VecDeque<u16>>>>,
+    /// The `Accept-Encoding` of every request other than catalog fetches.
+    encodings: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 /// Serves a catalog per path prefix, `/<kind>/models`, and completions that echo what arrived.
@@ -70,6 +72,9 @@ async fn provider(State(fake): State<Fake>, req: Request) -> Response {
     fake.seen.lock().unwrap().push((path.clone(), auth.clone()));
     let kind = path.split('/').nth(1).unwrap_or_default().to_owned();
     if !path.ends_with("/models") {
+        let encoding = req.headers().get(ACCEPT_ENCODING);
+        let encoding = encoding.map(|v| v.to_str().unwrap().to_owned());
+        fake.encodings.lock().unwrap().push(encoding);
         let next = fake
             .script
             .lock()
@@ -726,5 +731,28 @@ async fn a_reported_charge_is_counted_and_the_bytes_pass_unchanged() {
     }
     let want = [charged(0, 2), charged(1, 2), charged(2, 0)];
     h.counts(&want.iter().map(String::as_str).collect::<Vec<_>>())
+        .await;
+}
+
+#[tokio::test]
+async fn pool_attempts_ask_for_identity_so_a_charge_stays_readable() {
+    let h = start(&[("charged", "openrouter", "chat", MODEL)]).await;
+    h.wait_for(&["eligible"]).await;
+    let response = h
+        .client
+        .post(format!("{}/pools/free/chat/completions", h.base))
+        .bearer_auth(TOKEN)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT_ENCODING, "gzip")
+        .body(CHAT_BODY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.bytes().await.unwrap(), CHARGED.as_bytes());
+    assert_eq!(
+        *h.fake.encodings.lock().unwrap(),
+        [Some("identity".to_owned())]
+    );
+    h.counts(&[r#"llm3_pool_charged_responses_total{pool="free",route="p0/free-model"} 1"#])
         .await;
 }
