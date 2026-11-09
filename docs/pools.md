@@ -34,7 +34,9 @@ Fail-closed rules, the same for every catalog kind:
 
 - "Parses as exactly zero" means the value is a decimal (an OpenRouter string such as `"0"` or
   `"0.0"`, an opencode number such as `0`) whose value is exactly zero. Anything else, including
-  `"-1"`, closes the route.
+  `"-1"`, closes the route. An opencode number must be the integer `0`: a float such as `0.0` closes
+  the route, because a JSON parser underflows `1e-400` to it.
+- A model id the catalog lists more than once is free only when every listing is free.
 - A missing price object, or a missing required key from the table above, closes the route. An
   empty or partial price object is not proof.
 - Every other price key that is present must also parse as exactly zero. A key the proxy does not
