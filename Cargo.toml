@@ -3,6 +3,7 @@ name = "llmproxy"
 version = "0.1.0"
 edition = "2024"
 description = "Authenticated, rate-limited, fully configurable egress proxy for LLM provider APIs"
+license = "MPL-2.0"
 
 [dependencies]
 rpassword = "=7.5.4"
