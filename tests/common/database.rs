@@ -53,6 +53,7 @@ impl Database {
             max_connections: 4,
             connect_timeout: TIMEOUT,
             acquire_timeout: TIMEOUT,
+            insecure_tls: false,
         };
         let pool = PgPoolOptions::new()
             .acquire_timeout(TIMEOUT)

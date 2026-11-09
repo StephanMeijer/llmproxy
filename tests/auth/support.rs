@@ -79,6 +79,7 @@ impl Fixture {
             max_connections: 1,
             connect_timeout: Duration::from_millis(40),
             acquire_timeout: Duration::from_millis(40),
+            insecure_tls: false,
         }
     }
 

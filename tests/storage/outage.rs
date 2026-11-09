@@ -93,6 +93,7 @@ async fn postgres_stop_restart_recovers_same_runtime_and_listener() {
         max_connections: 2,
         connect_timeout: SHORT,
         acquire_timeout: SHORT,
+        insecure_tls: false,
     };
     let deadline = tokio::time::Instant::now() + DATABASE_STARTUP_TIMEOUT;
     loop {

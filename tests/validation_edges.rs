@@ -24,6 +24,7 @@ async fn invalid_pool_settings_are_rejected_before_connecting() {
         max_connections: 1,
         connect_timeout: Duration::from_secs(1),
         acquire_timeout: Duration::from_secs(1),
+        insecure_tls: false,
     };
     for invalid in [
         PostgresConfig {
@@ -36,6 +37,7 @@ async fn invalid_pool_settings_are_rejected_before_connecting() {
         },
         PostgresConfig {
             acquire_timeout: Duration::ZERO,
+            insecure_tls: false,
             ..valid()
         },
         PostgresConfig {

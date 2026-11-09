@@ -104,6 +104,7 @@ async fn child() {
         max_connections: 4,
         connect_timeout: Duration::from_secs(1),
         acquire_timeout: Duration::from_secs(1),
+        insecure_tls: false,
     };
     let storage = Storage::new(&config).unwrap();
     let state = ChildState {
