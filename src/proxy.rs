@@ -37,6 +37,8 @@ use crate::{
     storage::Storage,
 };
 
+mod pool;
+
 const HEALTH_PATH: &str = "/healthz";
 const METRICS_PATH: &str = "/metrics";
 const CHAT_COMPLETIONS_SUFFIX: &str = "/chat/completions";
