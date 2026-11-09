@@ -8,8 +8,8 @@ use serde::Deserialize;
 use super::{Config, ConfigError, http_upstream, valid_identifier};
 
 const POOLS_ROUTE: &str = "pools";
-/// `OpenRouter` models that pick another model themselves, so a zero price proves nothing.
-const OPENROUTER_META_ROUTERS: [&str; 2] = ["openrouter/free", "openrouter/auto"];
+/// `OpenRouter`'s own routers pick another model themselves, so a zero price proves nothing.
+const OPENROUTER_ROUTER_PREFIX: &str = "openrouter/";
 
 /// An upstream account whose live catalog proves which of its models are free.
 #[derive(Debug, Deserialize)]
@@ -181,11 +181,9 @@ pub(super) fn validate(config: &Config) -> Result<(), ConfigError> {
             if route.model.trim().is_empty() {
                 return err(format!("{at}: model must not be empty"));
             }
-            if catalog == Catalog::Openrouter
-                && OPENROUTER_META_ROUTERS.contains(&route.model.as_str())
-            {
+            if catalog == Catalog::Openrouter && route.model.starts_with(OPENROUTER_ROUTER_PREFIX) {
                 return err(format!(
-                    "{at}: {} picks its own model; name the model instead",
+                    "{at}: {} is an OpenRouter router that picks its own model; name the model instead",
                     route.model
                 ));
             }

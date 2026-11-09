@@ -95,7 +95,7 @@ Validated by `--check-config` but **not served yet** ([#28](https://github.com/S
 | | `rpm` | Requests per minute, positive. |
 | `[[pool]]` | `name` | Path `/pools/<name>/`. Needs at least one `[[pool.route]]`. |
 | `[[pool.route]]` | `priority` | Unique within the pool; the lowest is tried first. |
-| | `provider`, `model` | The provider and its model id. OpenRouter meta-routers (`openrouter/free`, `openrouter/auto`) are refused. |
+| | `provider`, `model` | The provider and its model id. On an `openrouter` catalog provider, models under `openrouter/` (OpenRouter's own routers, such as `openrouter/free`) are refused. |
 | | `context`, `max_output` | Token limits, positive. |
 | | `capabilities` | Any of `tools`, `vision`, `schema`. |
 | | `endpoints` | At least one of `chat`, `responses`. |

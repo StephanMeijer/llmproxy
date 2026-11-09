@@ -738,7 +738,7 @@ fn refuses_invalid_pools() {
                 "model = \"liquid/lfm-3-1.7b:free\"",
                 "model = \"openrouter/free\"",
             ),
-            "route 1: openrouter/free picks its own model",
+            "route 1: openrouter/free is an OpenRouter router that picks its own model",
         ),
         (
             ("context = 200000", "context = 0"),
@@ -762,6 +762,22 @@ fn refuses_invalid_pools() {
         };
         let why = refused(&text);
         assert!(why.contains(expected), "{expected:?}: {why}");
+    }
+}
+
+#[test]
+fn every_openrouter_namespace_model_is_refused() {
+    for model in ["openrouter/auto", "openrouter/anything"] {
+        let text = POOL.replacen(
+            "model = \"liquid/lfm-3-1.7b:free\"",
+            &format!("model = \"{model}\""),
+            1,
+        );
+        let why = refused(&text);
+        assert!(
+            why.contains(&format!("route 1: {model} is an OpenRouter router")),
+            "{why}"
+        );
     }
 }
 
