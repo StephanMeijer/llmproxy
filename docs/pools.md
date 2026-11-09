@@ -17,8 +17,8 @@ list. The catalog is fetched from `<upstream>/models` with the provider's config
 
 | Catalog kind | Fetched from | A model is free when |
 |---|---|---|
-| `openrouter` | `https://openrouter.ai/api/v1/models` | every value in its `pricing` object is the string `"0"`, including `overrides` entries |
-| `opencode` | `https://opencode.ai/zen/v1/models` | every price in its `cost` object is `0`: `price`, `cache.read`, `cache.write` at every level, including `overrides` entries |
+| `openrouter` | `https://openrouter.ai/api/v1/models` | `pricing.prompt` and `pricing.completion` are present, and every price in `pricing`, including `overrides` entries, parses as exactly zero |
+| `opencode` | `https://opencode.ai/zen/v1/models` | `cost.text.input.price` and `cost.text.output.price` are present, and every price in `cost` (`price`, `cache.read`, `cache.write` at every level, including `overrides` entries) parses as exactly zero |
 
 Both catalogs were checked on 2026-11-09:
 
@@ -32,15 +32,21 @@ Both catalogs were checked on 2026-11-09:
 
 Fail-closed rules, the same for every catalog kind:
 
-- A missing price object, a non-zero value, or a value that does not parse as zero closes the
-  route. A key the proxy does not recognise counts as a price, so it must be zero too. In opencode
-  `cost`, only `when` conditions (thresholds such as `context.gt`) and `multipliers[].factor` are
-  not prices: any factor times zero stays zero.
+- "Parses as exactly zero" means the value is a decimal (an OpenRouter string such as `"0"` or
+  `"0.0"`, an opencode number such as `0`) whose value is exactly zero. Anything else, including
+  `"-1"`, closes the route.
+- A missing price object, or a missing required key from the table above, closes the route. An
+  empty or partial price object is not proof.
+- Every other price key that is present must also parse as exactly zero. A key the proxy does not
+  recognise counts as a price. Only thresholds and factors are not prices: OpenRouter
+  `overrides[].min_prompt_tokens`, opencode `when` conditions (such as `context.gt`), and opencode
+  `multipliers[].factor` (any factor times zero stays zero).
 - A model missing from the catalog closes its route.
 - A fetch that fails, times out, returns non-2xx or does not parse keeps the previous proof only
   until that proof expires.
-- Meta-routers that pick a model themselves (`openrouter/free`, `openrouter/auto`) are refused in
-  config. The proof must be for the model that actually answers.
+- Every model in OpenRouter's own `openrouter/` namespace (`openrouter/free`, `openrouter/auto`
+  and any router added later) is refused in config: these routers pick the model themselves, and
+  the proof must be for the model that actually answers.
 
 Albert and MiniMax, the other providers in `config.example.toml`, answer `401` on `/models`
 without a key, and neither publishes prices in its catalog. They stay out of pools until they do.
@@ -69,14 +75,17 @@ A pool serves both `POST /pools/<pool>/chat/completions` and `POST /pools/<pool>
 
 ## Requests that could cost money anyway
 
-These are rejected with `400` before any upstream call (#29), because a zero price list does not
-cover them:
+A zero price list does not cover these, so a request carrying any of them is rejected with `400`
+before any upstream call (#29):
 
-- OpenRouter extras: `plugins`, `web_search_options`, an `:online` model suffix.
+- OpenRouter extras: `plugins`, `web_search_options`.
+- A body `model` ending in `:online`. This is checked on the request as received, before the
+  model is replaced.
 - Caller routing fields: `provider`, `models`, `route`. The pool picks the route, never the body
   (#28).
-- The body's `model` is replaced with the selected route's model. The caller names the pool, not
-  a model.
+
+Otherwise the body's `model` is not rejected but replaced with the selected route's model. The
+caller names the pool, not a model.
 
 ## Quota domains
 
@@ -109,14 +118,16 @@ context = 262144                  # tokens
 max_output = 8192
 capabilities = ["tools", "schema"] # of: tools, vision, schema
 endpoints = ["chat"]               # of: chat, responses
-quota = "openrouter-free"         # must belong to the route's provider
+quota = "openrouter-free"         # required; must belong to the route's provider
 ```
 
 `--check-config` validation (#27) refuses, offline:
 
 - duplicate pool, provider or quota-domain names;
 - an empty pool, or duplicate priorities within a pool;
-- a route naming an unknown provider or quota domain, or a quota domain of another provider;
+- a route without a quota domain, a route naming an unknown provider or quota domain, or a quota
+  domain of another provider;
 - zero `rpm`, `context` or `max_output`, and empty `endpoints`;
-- a static `[[route]]` named `pools` while any pool is configured;
-- an `openrouter` route whose model is a meta-router (`openrouter/free`, `openrouter/auto`).
+- a static `[[route]]` named `pools` while any `[[pool]]`, `[[pool_provider]]` or
+  `[[quota_domain]]` section is present;
+- a route on an `openrouter` catalog provider whose model starts with `openrouter/`.
