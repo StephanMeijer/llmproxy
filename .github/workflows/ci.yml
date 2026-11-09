@@ -38,8 +38,10 @@ jobs:
       # Fails on any RustSec advisory, including unmaintained and yanked crates, in Cargo.lock.
       - run: cargo audit --deny warnings
 
+  # Stays GitHub-hosted (free for this public repo): the tests drive Docker (docker exec/kill/run) and
+  # the postgres service needs a job container under the 9xx runners' Kubernetes hook.
   ci:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || '9xx' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
       postgres:
