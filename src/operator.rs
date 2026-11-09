@@ -4,7 +4,8 @@ use llmproxy::{
     config::{Config, CredentialEncryptionConfig},
     secret::{ProxyToken, TokenHasher},
     storage::{
-        CredentialState, CredentialVersion, Credentials, Person, PersonId, Storage, TokenId,
+        CredentialState, CredentialVersion, Credentials, Person, PersonId, Provider, Storage,
+        TokenId,
     },
 };
 use serde_json::{Value, json};
@@ -157,7 +158,7 @@ async fn execute(
                 active_key_id: target.to_owned(),
                 ..encryption(config)?.clone()
             };
-            let counts = Credentials::open(store.clone(), &encryption)?
+            let counts = Credentials::open(store.clone(), Provider::Anthropic, &encryption)?
                 .reencrypt()
                 .await?;
             Ok(Output::Metadata(
@@ -190,7 +191,7 @@ async fn claude(
     };
     let mut tx = store.begin().await?;
     let person = tx.person(id).await?;
-    let record = tx.credential(id).await?;
+    let record = tx.credential(Provider::Anthropic, id).await?;
     tx.rollback().await?;
     let version = record.as_ref().map(|record| CredentialVersion {
         person: id,
@@ -202,7 +203,8 @@ async fn claude(
             None => (json!("missing"), None),
         },
         Claude::Set { .. } => {
-            let credentials = Credentials::open(store.clone(), encryption(config)?)?;
+            let credentials =
+                Credentials::open(store.clone(), Provider::Anthropic, encryption(config)?)?;
             let secret = secret.as_ref().ok_or("credential input unavailable")?;
             let version = match version {
                 Some(version) => credentials.replace(version, secret).await?,
@@ -212,7 +214,8 @@ async fn claude(
         }
         Claude::Remove => {
             let version = version.ok_or("credential not found")?;
-            let credentials = Credentials::open(store.clone(), encryption(config)?)?;
+            let credentials =
+                Credentials::open(store.clone(), Provider::Anthropic, encryption(config)?)?;
             let removed = credentials.remove(version).await?;
             (json!(CredentialState::Removed), Some(removed.generation))
         }

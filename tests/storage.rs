@@ -20,8 +20,8 @@ use llmproxy::{
     limit::shared::{CompiledLimits, SharedDefinition},
     secret::CredentialEnvelope,
     storage::{
-        self, ChangeListener, CredentialRecord, CredentialState, LimitKey, PersonId, Storage,
-        StorageError,
+        self, ChangeListener, CredentialRecord, CredentialState, LimitKey, PersonId, Provider,
+        Storage, StorageError,
     },
 };
 use std::time::Duration;
@@ -43,6 +43,7 @@ async fn setup() -> (database::Database, Storage, PersonId) {
 
 fn credential(person: PersonId) -> CredentialRecord {
     CredentialRecord {
+        provider: Provider::Anthropic,
         person,
         generation: 1,
         state: CredentialState::Active,
@@ -76,7 +77,7 @@ impl CredentialReader {
     ) -> Result<Option<CredentialRecord>, StorageError> {
         self.listener.changed(wait).await?;
         let mut tx = self.storage.begin().await?;
-        let result = tx.credential(person).await?;
+        let result = tx.credential(Provider::Anthropic, person).await?;
         tx.rollback().await?;
         Ok(result)
     }
@@ -84,7 +85,7 @@ impl CredentialReader {
 
 fn definition() -> SharedDefinition {
     let config = Config::parse("listen='127.0.0.1:0'\nproxy_token='t'\n[[limit]]\nname='budget'\nprefixes=['/claude/']\nrpm=10\n", |_| None).unwrap();
-    CompiledLimits::new(&config.limits, "test")
+    CompiledLimits::new(&config.limits, "test", Provider::Anthropic, "/claude/")
         .unwrap()
         .shared
         .remove(0)
@@ -95,6 +96,7 @@ async fn putting_an_unchanged_definition_does_not_rewrite_its_row() {
     // Given a stored definition.
     let (db, store, person) = setup().await;
     let key = LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     };
@@ -123,12 +125,14 @@ async fn putting_an_unchanged_definition_does_not_rewrite_its_row() {
 async fn repositories_reject_invalid_state_changes_and_report_conflicts() {
     let (db, store, person) = setup().await;
     let key = LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     };
     let mut tx = store.begin().await.unwrap();
     tx.put_limit(&key, &definition()).await.unwrap();
     let mismatched = LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "other".into(),
     };
@@ -149,15 +153,17 @@ async fn repositories_reject_invalid_state_changes_and_report_conflicts() {
     tx.commit().await.unwrap();
     let bob = PersonId(Uuid::new_v4());
     let conflicting = Config::parse("listen='127.0.0.1:0'\nproxy_token='t'\n[[limit]]\nname='budget'\nprefixes=['/claude/']\nrpm=11\n", |_| None).unwrap();
-    let conflicting = CompiledLimits::new(&conflicting.limits, "test")
-        .unwrap()
-        .shared
-        .remove(0);
+    let conflicting =
+        CompiledLimits::new(&conflicting.limits, "test", Provider::Anthropic, "/claude/")
+            .unwrap()
+            .shared
+            .remove(0);
     let mut tx = store.begin().await.unwrap();
     tx.create_person(bob, "Bob").await.unwrap();
     assert!(matches!(
         tx.put_limit(
             &LimitKey {
+                provider: Provider::Anthropic,
                 person: bob,
                 name: "budget".into()
             },

@@ -64,7 +64,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     // Then only the new key is referenced, both secrets survive, and another run is a no-op.
     assert_eq!(key_references(&db, "old").await, 0);
     assert_eq!(key_references(&db, "new").await, 2);
-    let repeated = Credentials::open(store.clone(), &config)
+    let repeated = Credentials::open(store.clone(), Provider::Anthropic, &config)
         .unwrap()
         .reencrypt()
         .await

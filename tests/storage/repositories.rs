@@ -20,7 +20,11 @@ async fn people_tokens_and_ciphertext_roundtrip_without_plaintext() {
     // When the current records are read through a fresh transaction.
     let mut tx = store.begin().await.unwrap();
     let token = tx.token(token_id).await.unwrap();
-    let stored = tx.credential(person).await.unwrap().unwrap();
+    let stored = tx
+        .credential(Provider::Anthropic, person)
+        .await
+        .unwrap()
+        .unwrap();
     // Then only the verifier and ciphertext are returned.
     assert_eq!(token.secret_hash, "$argon2id$test-verifier");
     assert!(token.person_enabled && !token.revoked);
@@ -78,13 +82,21 @@ async fn credential_replace_remove_and_stale_generation_are_atomic() {
         tx.replace_credential(&credential(person), &[4; 32]).await,
         Err(StorageError::Conflict)
     );
-    let mut record = tx.credential(person).await.unwrap().unwrap();
+    let mut record = tx
+        .credential(Provider::Anthropic, person)
+        .await
+        .unwrap()
+        .unwrap();
     record.state = CredentialState::Removed;
     assert_eq!(tx.set_credential_state(&record).await.unwrap(), 3);
     tx.commit().await.unwrap();
     // Then removal retains only the tombstone generation.
     let mut tx = store.begin().await.unwrap();
-    let stored = tx.credential(person).await.unwrap().unwrap();
+    let stored = tx
+        .credential(Provider::Anthropic, person)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.state, CredentialState::Removed);
     assert!(stored.envelope.is_none());
     assert_eq!(stored.generation, 3);
@@ -98,6 +110,7 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     // Given a limit definition and two reservations.
     let (db, store, person) = setup().await;
     let key = LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     };
@@ -151,6 +164,7 @@ async fn expired_leases_cannot_revive_and_reclaim_uses_database_time() {
     // Given already expired reservations, without using the application clock.
     let (db, store, person) = setup().await;
     let key = LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     };

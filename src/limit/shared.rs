@@ -15,16 +15,18 @@ use serde::Serialize;
 
 use super::Limits;
 use crate::config::{ConfigError, LimitConfig};
+use crate::storage::Provider;
 
-pub const CLAUDE_PREFIX: &str = "/claude/";
-const PROVIDER: &str = "anthropic";
 const ACCOUNTING_VERSION: u32 = 1;
 
 /// Canonical behavior payload. Field order is fixed by this struct's serializer.
 #[derive(Debug, Clone, Serialize)]
 pub struct SharedDefinition {
     namespace: String,
-    provider: &'static str,
+    provider: Provider,
+    /// The adapter's path prefix; not stored, so existing definitions keep matching.
+    #[serde(skip)]
+    prefix: &'static str,
     name: String,
     accounting_version: u32,
     order: usize,
@@ -44,6 +46,11 @@ impl SharedDefinition {
     }
 
     #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    #[must_use]
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
@@ -55,7 +62,7 @@ impl SharedDefinition {
 
     #[must_use]
     pub fn matches(&self, path: &str, model: Option<&str>) -> bool {
-        path.starts_with(CLAUDE_PREFIX)
+        path.starts_with(self.prefix)
             && self.model.as_deref().is_none_or(|m| model == Some(m))
             && (self.prefixes.is_empty() || self.prefixes.iter().any(|p| path.starts_with(p)))
     }
@@ -82,19 +89,25 @@ pub struct CompiledLimits {
 }
 
 impl CompiledLimits {
-    /// Compile when the Claude adapter is enabled. Legacy callers keep [`Limits::new`].
+    /// Compile when an adapter is enabled; its `prefix` paths use shared definitions.
+    /// Legacy callers keep [`Limits::new`].
     /// # Errors
     /// Returns existing limit validation errors or rejects duplicate shared names.
-    pub fn new(configs: &[LimitConfig], namespace: &str) -> Result<Self, ConfigError> {
+    pub fn new(
+        configs: &[LimitConfig],
+        namespace: &str,
+        provider: Provider,
+        prefix: &'static str,
+    ) -> Result<Self, ConfigError> {
         let mut local = Limits::new(configs)?;
-        local.exclude_claude = true;
+        local.shared_prefix = Some(prefix);
         let mut shared: Vec<SharedDefinition> = Vec::new();
         for (order, cfg) in configs.iter().enumerate() {
             let overlaps = cfg.prefixes.is_empty()
                 || cfg
                     .prefixes
                     .iter()
-                    .any(|p| CLAUDE_PREFIX.starts_with(p) || p.starts_with(CLAUDE_PREFIX));
+                    .any(|p| prefix.starts_with(p) || p.starts_with(prefix));
             if !overlaps {
                 continue;
             }
@@ -103,7 +116,8 @@ impl CompiledLimits {
             }
             shared.push(SharedDefinition {
                 namespace: namespace.to_owned(),
-                provider: PROVIDER,
+                provider,
+                prefix,
                 name: cfg.name.clone(),
                 accounting_version: ACCOUNTING_VERSION,
                 order,

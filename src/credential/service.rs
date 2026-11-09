@@ -2,7 +2,7 @@ use super::{CredentialRecord, CredentialState};
 use crate::{
     config::CredentialEncryptionConfig,
     secret::{self, CredentialContext, KeyRing, SecretBytes, SecretError, credential_fingerprint},
-    storage::{PersonId, Storage, StorageError},
+    storage::{PersonId, Provider, Storage, StorageError},
 };
 use std::fmt;
 
@@ -50,6 +50,7 @@ pub struct CredentialSnapshot {
 /// Namespace-scoped encrypted credential operations with a stable fingerprint pepper.
 pub struct Credentials {
     storage: Storage,
+    provider: Provider,
     keys: KeyRing,
     fingerprint_key: SecretBytes,
 }
@@ -62,6 +63,7 @@ impl Credentials {
         let mut tx = self.storage.begin().await?;
         tx.set_credential_state(&CredentialRecord {
             person: version.person,
+            provider: self.provider,
             generation: version.generation,
             state: CredentialState::Invalid,
             envelope: None,
@@ -75,21 +77,28 @@ impl Credentials {
     /// Returns which key file is missing, unreadable or malformed.
     pub fn open(
         storage: Storage,
+        provider: Provider,
         config: &CredentialEncryptionConfig,
     ) -> Result<Self, KeyLoadError> {
         let keys =
             KeyRing::load(&config.active_key_id, &config.keys).map_err(KeyLoadError::Ring)?;
         let fingerprint_key =
             secret::key_file(&config.fingerprint_key_file).map_err(KeyLoadError::Fingerprint)?;
-        Ok(Self::new(storage, keys, fingerprint_key))
+        Ok(Self::new(storage, provider, keys, fingerprint_key))
     }
 
     /// Builds from already loaded keys; production code uses [`Credentials::open`].
     /// Keep the fingerprint key stable across encryption-key rotations and replicas.
     #[must_use]
-    pub const fn new(storage: Storage, keys: KeyRing, fingerprint_key: SecretBytes) -> Self {
+    pub const fn new(
+        storage: Storage,
+        provider: Provider,
+        keys: KeyRing,
+        fingerprint_key: SecretBytes,
+    ) -> Self {
         Self {
             storage,
+            provider,
             keys,
             fingerprint_key,
         }
@@ -154,6 +163,7 @@ impl Credentials {
         let generation = tx
             .set_credential_state(&CredentialRecord {
                 person: version.person,
+                provider: self.provider,
                 generation: version.generation,
                 state: CredentialState::Removed,
                 envelope: None,
@@ -174,7 +184,7 @@ impl Credentials {
     pub async fn snapshot(&self, person: PersonId) -> Result<CredentialSnapshot, StorageError> {
         let mut tx = self.storage.begin().await?;
         let record = tx
-            .credential(person)
+            .credential(self.provider, person)
             .await?
             .ok_or(StorageError::Unavailable)?;
         match record.state {
@@ -212,6 +222,7 @@ impl Credentials {
         Ok((
             CredentialRecord {
                 person: version.person,
+                provider: self.provider,
                 generation: version.generation,
                 state: CredentialState::Active,
                 envelope: Some(envelope),
@@ -224,7 +235,7 @@ impl Credentials {
         CredentialContext {
             namespace: &self.storage.namespace,
             person: person.0,
-            provider: "anthropic",
+            provider: self.provider.as_str(),
         }
     }
 }

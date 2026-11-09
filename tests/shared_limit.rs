@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use llmproxy::storage::Provider;
 use llmproxy::{
     config::LimitConfig,
     limit::shared::{
@@ -76,10 +77,13 @@ fn invalid_durable_balance_is_rejected_without_mutation() {
 #[test]
 fn stored_definitions_detect_every_behavior_change_and_order() {
     let original = configs("name='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=1");
-    let first = CompiledLimits::new(&original, "ns").unwrap();
+    let first = CompiledLimits::new(&original, "ns", Provider::Anthropic, "/claude/").unwrap();
     // put_limit compares this serialization as JSONB to reject a conflicting replica.
     let stored = serde_json::to_value(first.shared.first().unwrap()).unwrap();
-    let identical = CompiledLimits::new(&original, "ns").unwrap();
+    // Definitions stored before providers were configurable must still compare equal.
+    assert_eq!(stored.get("provider").unwrap(), "anthropic");
+    assert!(stored.get("prefix").is_none());
+    let identical = CompiledLimits::new(&original, "ns", Provider::Anthropic, "/claude/").unwrap();
     assert_eq!(
         serde_json::to_value(identical.shared.first().unwrap()).unwrap(),
         stored
@@ -88,7 +92,8 @@ fn stored_definitions_detect_every_behavior_change_and_order() {
         let changed = configs(&format!(
             "name='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=1\n{field}"
         ));
-        let compiled = CompiledLimits::new(&changed, "ns").unwrap();
+        let compiled =
+            CompiledLimits::new(&changed, "ns", Provider::Anthropic, "/claude/").unwrap();
         assert_ne!(
             serde_json::to_value(compiled.shared.first().unwrap()).unwrap(),
             stored
@@ -101,7 +106,8 @@ fn stored_definitions_detect_every_behavior_change_and_order() {
         "name='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=2",
         "name='b'\nprefixes=['/']\nrpm=1\n---\nname='a'\nprefixes=['/']\nrpm=1\ntpm=10\nmax_inflight=1",
     ] {
-        let compiled = CompiledLimits::new(&configs(changed), "ns").unwrap();
+        let compiled =
+            CompiledLimits::new(&configs(changed), "ns", Provider::Anthropic, "/claude/").unwrap();
         assert_ne!(
             serde_json::to_value(compiled.shared.last().unwrap()).unwrap(),
             stored
@@ -116,6 +122,8 @@ async fn compilation_keeps_static_pools_local_and_claude_shared() {
             "name='all'\nprefixes=['/']\nrpm=1\n---\nname='static'\nprefixes=['/static/']\nrpm=1",
         ),
         "ns",
+        Provider::Anthropic,
+        "/claude/",
     )
     .unwrap();
     assert_eq!(compiled.shared.len(), 1);
@@ -132,6 +140,8 @@ fn shared_matching_preserves_model_and_path_intersection() {
     let compiled = CompiledLimits::new(
         &configs("name='a'\nmodel='big'\nprefixes=['/claude/v1/']\nrpm=1"),
         "ns",
+        Provider::Anthropic,
+        "/claude/",
     )
     .unwrap();
     let definition = compiled.shared.first().unwrap();
@@ -142,7 +152,9 @@ fn shared_matching_preserves_model_and_path_intersection() {
     assert!(
         CompiledLimits::new(
             &configs("name='a'\nprefixes=['/']\nrpm=1\n---\nname='a'\nprefixes=['/']\nrpm=1"),
-            "ns"
+            "ns",
+            Provider::Anthropic,
+            "/claude/"
         )
         .is_err()
     );
@@ -160,8 +172,8 @@ async fn two_replicas_accept_identical_definitions_and_reject_conflicting_burst(
         fail: None,
     };
     let config = configs("name='a'\nprefixes=['/']\nrpm=1");
-    let first = CompiledLimits::new(&config, "ns").unwrap();
-    let second = CompiledLimits::new(&config, "ns").unwrap();
+    let first = CompiledLimits::new(&config, "ns", Provider::Anthropic, "/claude/").unwrap();
+    let second = CompiledLimits::new(&config, "ns", Provider::Anthropic, "/claude/").unwrap();
     let alice = Uuid::new_v4();
     drop(
         PendingAdmission::new(&first.shared, request(alice))
@@ -175,8 +187,13 @@ async fn two_replicas_accept_identical_definitions_and_reject_conflicting_burst(
             .await
             .unwrap(),
     );
-    let conflict =
-        CompiledLimits::new(&configs("name='a'\nprefixes=['/']\nrpm=1\nburst=1"), "ns").unwrap();
+    let conflict = CompiledLimits::new(
+        &configs("name='a'\nprefixes=['/']\nrpm=1\nburst=1"),
+        "ns",
+        Provider::Anthropic,
+        "/claude/",
+    )
+    .unwrap();
     assert!(
         PendingAdmission::new(&conflict.shared, request(Uuid::new_v4()))
             .acquire(&b)
@@ -201,6 +218,8 @@ async fn later_failure_releases_earlier_leases_without_refunding_rate_charge() {
     let compiled = CompiledLimits::new(
         &configs("name='first'\nprefixes=['/']\nrpm=1\n---\nname='later'\nprefixes=['/']\nrpm=1"),
         "ns",
+        Provider::Anthropic,
+        "/claude/",
     )
     .unwrap();
     let person = Uuid::new_v4();
@@ -227,6 +246,8 @@ async fn retries_hold_admission_without_recharge_and_people_have_separate_keys()
     let compiled = CompiledLimits::new(
         &configs("name='a'\nprefixes=['/']\nrpm=1\n---\nname='b'\nprefixes=['/']\nrpm=1"),
         "ns",
+        Provider::Anthropic,
+        "/claude/",
     )
     .unwrap();
     let alice = Uuid::new_v4();
@@ -262,7 +283,7 @@ async fn retries_hold_admission_without_recharge_and_people_have_separate_keys()
 fn definitions_expose_inflight_and_initial_buckets_and_errors_render() {
     let limits = CompiledLimits::new(
         &configs("name='a'\nprefixes=['/claude/']\nrpm=2\ntpm=10\nmax_inflight=3\n---\nname='b'\nprefixes=['/claude/']\nrpm=1"),
-        "ns",
+        "ns", Provider::Anthropic, "/claude/"
     )
     .unwrap();
     let a = limits.shared.first().unwrap();

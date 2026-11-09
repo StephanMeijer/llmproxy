@@ -22,7 +22,7 @@ mod scenarios;
 use llmproxy::{
     config::Config,
     limit::shared::{CompiledLimits, RENEW_EVERY, SharedDefinition},
-    storage::{self, LEASE_LIFETIME, LimitKey, PersonId, Storage},
+    storage::{self, LEASE_LIFETIME, LimitKey, PersonId, Provider, Storage},
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -31,7 +31,7 @@ const BOUND: Duration = Duration::from_secs(8);
 
 fn definition() -> SharedDefinition {
     let config = Config::parse("listen='127.0.0.1:0'\nproxy_token='t'\n[[limit]]\nname='concurrency'\nprefixes=['/claude/']\nmax_inflight=1\n", |_| None).unwrap();
-    CompiledLimits::new(&config.limits, "test")
+    CompiledLimits::new(&config.limits, "test", Provider::Anthropic, "/claude/")
         .unwrap()
         .shared
         .remove(0)
@@ -42,6 +42,7 @@ async fn setup() -> (database::Database, Storage, LimitKey) {
     storage::migrate(&db.config).await.unwrap();
     let storage = Storage::new(&db.config).unwrap();
     let key = LimitKey {
+        provider: Provider::Anthropic,
         person: PersonId(Uuid::new_v4()),
         name: "concurrency".into(),
     };

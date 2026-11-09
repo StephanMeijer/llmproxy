@@ -10,7 +10,11 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
         .await
         .unwrap();
     let mut tx = store.begin().await.unwrap();
-    let mut record = tx.credential(alice).await.unwrap().unwrap();
+    let mut record = tx
+        .credential(Provider::Anthropic, alice)
+        .await
+        .unwrap()
+        .unwrap();
     record.state = storage::CredentialState::Invalid;
     tx.set_credential_state(&record).await.unwrap();
     tx.commit().await.unwrap();
@@ -23,7 +27,7 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
     let old = config.keys.remove("old").unwrap();
     // When old-key absence and wrong old-key material prevent authentication.
     assert_eq!(
-        Credentials::open(store.clone(), &config)
+        Credentials::open(store.clone(), Provider::Anthropic, &config)
             .unwrap()
             .reencrypt()
             .await
@@ -33,7 +37,7 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
     fs::write(&old, [7; 32]).unwrap();
     config.keys.insert("old".into(), old.clone());
     assert_eq!(
-        Credentials::open(store.clone(), &config)
+        Credentials::open(store.clone(), Provider::Anthropic, &config)
             .unwrap()
             .reencrypt()
             .await
@@ -49,7 +53,7 @@ async fn failed_rotation_preserves_ciphertext_and_invalid_state() {
     // Then restoring the correct old key rotates without reactivating the credential.
     fs::write(&old, [1; 32]).unwrap();
     assert_eq!(
-        Credentials::open(store.clone(), &config)
+        Credentials::open(store.clone(), Provider::Anthropic, &config)
             .unwrap()
             .reencrypt()
             .await

@@ -5,19 +5,7 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-/// Providers with credential storage, independent of configured route names.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum CredentialProvider {
-    Anthropic,
-}
-
-impl CredentialProvider {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-        }
-    }
-}
+use crate::storage::Provider;
 
 /// Current credential usability, including local decryption failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,8 +84,8 @@ impl CredentialOutcome {
 struct Snapshot {
     postgres_available: bool,
     shared_limit_conflicts: u64,
-    credentials: BTreeMap<CredentialProvider, CredentialCounts>,
-    operations: BTreeMap<(CredentialProvider, CredentialOperation, CredentialOutcome), u64>,
+    credentials: BTreeMap<Provider, CredentialCounts>,
+    operations: BTreeMap<(Provider, CredentialOperation, CredentialOutcome), u64>,
 }
 
 /// Process-local telemetry updated by storage/credential lifecycle owners.
@@ -127,7 +115,7 @@ impl StorageMetrics {
     /// Callers must serialize refreshes so an older query cannot overwrite newer
     /// counts. Repeated snapshots are idempotent. No counts are emitted before
     /// the first successful snapshot, and failed refreshes must leave it intact.
-    pub fn set_credentials(&self, provider: CredentialProvider, counts: CredentialCounts) {
+    pub fn set_credentials(&self, provider: Provider, counts: CredentialCounts) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -139,7 +127,7 @@ impl StorageMetrics {
     /// The counter is local to this process, monotonic, and saturates at `u64::MAX`.
     pub fn record_operation(
         &self,
-        provider: CredentialProvider,
+        provider: Provider,
         operation: CredentialOperation,
         outcome: CredentialOutcome,
     ) {
@@ -157,7 +145,7 @@ impl StorageMetrics {
         let available = u8::from(snapshot.postgres_available);
         let shared_limit_conflicts = snapshot.shared_limit_conflicts;
         let credentials = snapshot.credentials.iter().flat_map(|(provider, counts)| {
-            let provider = provider.label();
+            let provider = provider.as_str();
             [
                 (CredentialState::Active, counts.active),
                 (CredentialState::Invalid, counts.invalid),
@@ -172,7 +160,7 @@ impl StorageMetrics {
         }).collect::<String>();
         let operations = snapshot.operations.iter().map(|((provider, operation, outcome), count)| {
             let (provider, operation, outcome) =
-                (provider.label(), operation.label(), outcome.label());
+                (provider.as_str(), operation.label(), outcome.label());
             format!(
                 "llm3_credential_operations_total{{provider=\"{provider}\",operation=\"{operation}\",outcome=\"{outcome}\"}} {count}\n"
             )

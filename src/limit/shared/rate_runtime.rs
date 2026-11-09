@@ -171,6 +171,7 @@ impl AdmissionStore for SharedRateStore {
         tokio::time::timeout_at(deadline, async {
             let key = LimitKey {
                 person: PersonId(charge.person),
+                provider: charge.definition.provider(),
                 name: charge.definition.name().to_owned(),
             };
             let fenced = FencedLease::new(self.owner);

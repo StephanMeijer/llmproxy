@@ -40,9 +40,9 @@ impl StorageTransaction {
             return Err(StorageError::InvalidData);
         }
         self.lock_definition(key).await?;
-        Ok(sqlx::query("INSERT INTO concurrency_leases(namespace,person_id,provider,limit_name,id,owner,expires_at) SELECT $1,$2,'anthropic',$3,$4,$5,clock_timestamp()+$6::bigint*interval '1 second' WHERE (SELECT count(*) FROM concurrency_leases WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at>clock_timestamp())<$7")
+        Ok(sqlx::query("INSERT INTO concurrency_leases(namespace,person_id,provider,limit_name,id,owner,expires_at) SELECT $1,$2,$8,$3,$4,$5,clock_timestamp()+$6::bigint*interval '1 second' WHERE (SELECT count(*) FROM concurrency_leases WHERE namespace=$1 AND person_id=$2 AND provider=$8 AND limit_name=$3 AND expires_at>clock_timestamp())<$7")
             .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner)
-            .bind(lifetime_seconds()?).bind(maximum).execute(&mut *self.tx).await?.rows_affected() == 1)
+            .bind(lifetime_seconds()?).bind(maximum).bind(key.provider).execute(&mut *self.tx).await?.rows_affected() == 1)
     }
 
     /// Renews only this owner's unexpired lease using server time.
@@ -54,8 +54,8 @@ impl StorageTransaction {
         lease: &FencedLease,
     ) -> Result<bool, StorageError> {
         self.lock_definition(key).await?;
-        Ok(sqlx::query("UPDATE concurrency_leases SET expires_at=clock_timestamp()+$4::bigint*interval '1 second' WHERE namespace=$1 AND id=$2 AND owner=$3 AND person_id=$5 AND provider='anthropic' AND limit_name=$6 AND expires_at>clock_timestamp()")
-            .bind(&self.namespace).bind(lease.id).bind(lease.owner).bind(lifetime_seconds()?).bind(key.person).bind(&key.name)
+        Ok(sqlx::query("UPDATE concurrency_leases SET expires_at=clock_timestamp()+$4::bigint*interval '1 second' WHERE namespace=$1 AND id=$2 AND owner=$3 AND person_id=$5 AND provider=$7 AND limit_name=$6 AND expires_at>clock_timestamp()")
+            .bind(&self.namespace).bind(lease.id).bind(lease.owner).bind(lifetime_seconds()?).bind(key.person).bind(&key.name).bind(key.provider)
             .execute(&mut *self.tx).await?.rows_affected() == 1)
     }
 
@@ -68,8 +68,8 @@ impl StorageTransaction {
         lease: &FencedLease,
     ) -> Result<bool, StorageError> {
         self.lock_definition(key).await?;
-        Ok(sqlx::query("DELETE FROM concurrency_leases WHERE namespace=$1 AND id=$2 AND owner=$3 AND person_id=$4 AND provider='anthropic' AND limit_name=$5")
-            .bind(&self.namespace).bind(lease.id).bind(lease.owner).bind(key.person).bind(&key.name)
+        Ok(sqlx::query("DELETE FROM concurrency_leases WHERE namespace=$1 AND id=$2 AND owner=$3 AND person_id=$4 AND provider=$6 AND limit_name=$5")
+            .bind(&self.namespace).bind(lease.id).bind(lease.owner).bind(key.person).bind(&key.name).bind(key.provider)
             .execute(&mut *self.tx).await?.rows_affected() == 1)
     }
 }

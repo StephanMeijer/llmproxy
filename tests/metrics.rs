@@ -8,12 +8,13 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use axum::Router;
 use llmproxy::{
     config::Config,
-    metrics::{CredentialCounts, CredentialOperation, CredentialOutcome, CredentialProvider},
+    metrics::{CredentialCounts, CredentialOperation, CredentialOutcome},
     proxy::{Metrics, Proxy, metrics_router, router},
+    storage::Provider,
 };
 use tokio::{net::TcpListener, task::JoinSet};
 
-const PROVIDER: CredentialProvider = CredentialProvider::Anthropic;
+const PROVIDER: Provider = Provider::Anthropic;
 const CANARIES: [&str; 8] = [
     "person.[alice]*",
     "token.+^$[secret]",

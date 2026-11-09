@@ -12,7 +12,7 @@ mod shutdown;
 pub use evidence::artifact;
 use llmproxy::{
     secret::{KeyRing, ProxyToken, SecretBytes, TokenHasher},
-    storage::{self, CredentialVersion, Credentials, PersonId, Storage, TokenId},
+    storage::{self, CredentialVersion, Credentials, PersonId, Provider, Storage, TokenId},
 };
 pub use provider::{Hit, reply, stream};
 use std::{
@@ -102,7 +102,12 @@ impl Fixture {
             std::collections::BTreeMap::from([("test".into(), SecretBytes::new(vec![1; 32]))]),
         )
         .unwrap();
-        let credentials = Credentials::new(storage.clone(), keys, SecretBytes::new(vec![2; 32]));
+        let credentials = Credentials::new(
+            storage.clone(),
+            Provider::Anthropic,
+            keys,
+            SecretBytes::new(vec![2; 32]),
+        );
         let alice_version = credentials
             .install(alice_id, &SecretBytes::new(ALICE_KEY.to_vec()))
             .await

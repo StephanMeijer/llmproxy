@@ -12,8 +12,8 @@ impl Credentials {
     /// Returns a sanitized database error, preserving the caller's previous snapshot.
     pub async fn counts(&self) -> Result<CredentialCounts, StorageError> {
         let mut tx = self.storage.begin().await?;
-        let rows = sqlx::query("SELECT person_id,state,format_version,key_id,nonce,ciphertext FROM provider_credentials WHERE namespace=$1 AND provider='anthropic'")
-            .bind(&self.storage.namespace).fetch_all(&mut *tx.tx).await?;
+        let rows = sqlx::query("SELECT person_id,state,format_version,key_id,nonce,ciphertext FROM provider_credentials WHERE namespace=$1 AND provider=$2")
+            .bind(&self.storage.namespace).bind(self.provider).fetch_all(&mut *tx.tx).await?;
         tx.rollback().await?;
         let mut counts = CredentialCounts::default();
         for row in rows {
