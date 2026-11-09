@@ -531,6 +531,9 @@ fn postgres_requires_verified_tls_for_non_local_hosts() {
         ("postgres://localhost/x", ""),
         ("postgres://127.0.0.1/x", ""),
         ("postgres://[::1]/x", ""),
+        ("postgres://LOCALHOST/x", ""),
+        ("postgres://localhost./x", ""),
+        ("postgres://[::ffff:127.0.0.1]/x", ""),
         ("postgres://db.internal/x?host=/run/postgresql", ""),
     ] {
         assert!(

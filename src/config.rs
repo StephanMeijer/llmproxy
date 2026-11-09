@@ -309,10 +309,11 @@ impl PostgresConfig {
     #[must_use]
     pub fn unverified_remote(&self) -> bool {
         PgConnectOptions::from_str(&self.url).is_ok_and(|options| {
-            let host = options.get_host();
+            let host = options.get_host().trim_end_matches('.');
             options.get_socket().is_none()
-                && host != "localhost"
-                && !IpAddr::from_str(host.trim_matches(['[', ']'])).is_ok_and(|ip| ip.is_loopback())
+                && !host.eq_ignore_ascii_case("localhost")
+                && !IpAddr::from_str(host.trim_matches(['[', ']']))
+                    .is_ok_and(|ip| ip.to_canonical().is_loopback())
                 && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull)
         })
     }
