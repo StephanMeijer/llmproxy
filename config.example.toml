@@ -37,6 +37,12 @@ tool_choice_prefix = "/albert/"           # optional; add tool_choice:"auto" whe
 # [claude]                               # reserves /claude; do not add a static route named claude
 # upstream = "https://api.anthropic.com"  # default; normalized with a trailing slash
 # retry_429 = true                       # default; set false to return upstream 429 immediately
+#
+# [chatgpt]                              # validated only: sign-in and route are not served yet; reserves /chatgpt
+# auth_issuer = "https://auth.openai.com"   # default; OIDC issuer, stored without a trailing slash
+# upstream = "https://api.openai.com/v1"    # default; normalized with a trailing slash
+# callback_listen = "127.0.0.1:1455"        # default; sign-in callback, must be on 127.0.0.1 (not localhost)
+# agent_name = "llmproxy"                   # default; shown on OpenAI's consent page, 1–64 printable ASCII
 
 # `/<name>/<rest>` is forwarded to `<upstream>/<rest>`. The client's Authorization and
 # x-api-key are always dropped; `headers` sets the provider credential ("" removes a header).

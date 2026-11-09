@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     env, fmt, fs,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -32,6 +32,13 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const MAX_IDENTIFIER_LENGTH: usize = 63;
 const DEFAULT_CLAUDE_UPSTREAM: &str = "https://api.anthropic.com";
 const CLAUDE_ROUTE: &str = "claude";
+const DEFAULT_CHATGPT_AUTH_ISSUER: &str = "https://auth.openai.com";
+const DEFAULT_CHATGPT_UPSTREAM: &str = "https://api.openai.com/v1";
+/// `OpenAI` fixes the redirect URI's scheme, host and path; only the port may change.
+const DEFAULT_CHATGPT_CALLBACK: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1455);
+const DEFAULT_CHATGPT_AGENT_NAME: &str = "llmproxy";
+const MAX_AGENT_NAME_LENGTH: usize = 64;
+const CHATGPT_ROUTE: &str = "chatgpt";
 
 /// Anything wrong with the configuration; the message says what and where.
 #[derive(Debug)]
@@ -73,6 +80,7 @@ pub struct Config {
     pub postgres: Option<PostgresConfig>,
     pub credential_encryption: Option<CredentialEncryptionConfig>,
     pub claude: Option<ClaudeConfig>,
+    pub chatgpt: Option<ChatGptConfig>,
     #[serde(default, rename = "route")]
     pub routes: Vec<RouteConfig>,
     #[serde(default, rename = "limit")]
@@ -133,6 +141,24 @@ pub struct ClaudeConfig {
     pub upstream: String,
     #[serde(default = "default_retry_429")]
     pub retry_429: bool,
+}
+
+/// `ChatGPT` sign-in adapter; its prefix is reserved when this section is present. Validated only:
+/// the sign-in flow and route are not served yet.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatGptConfig {
+    /// `OpenAI`'s OIDC issuer, stored without a trailing slash.
+    #[serde(default = "default_chatgpt_auth_issuer")]
+    pub auth_issuer: String,
+    #[serde(default = "default_chatgpt_upstream")]
+    pub upstream: String,
+    /// Sign-in callback listener; must be on 127.0.0.1 (`OpenAI` refuses `localhost`).
+    #[serde(default = "default_chatgpt_callback")]
+    pub callback_listen: SocketAddr,
+    /// Shown to the person on `OpenAI`'s consent page.
+    #[serde(default = "default_chatgpt_agent_name")]
+    pub agent_name: String,
 }
 
 /// `/<name>/<rest>` is forwarded to `<upstream>/<rest>`.
@@ -200,6 +226,22 @@ const fn default_max_connections() -> u32 {
 
 fn default_claude_upstream() -> String {
     DEFAULT_CLAUDE_UPSTREAM.to_owned()
+}
+
+fn default_chatgpt_auth_issuer() -> String {
+    DEFAULT_CHATGPT_AUTH_ISSUER.to_owned()
+}
+
+fn default_chatgpt_upstream() -> String {
+    DEFAULT_CHATGPT_UPSTREAM.to_owned()
+}
+
+const fn default_chatgpt_callback() -> SocketAddr {
+    DEFAULT_CHATGPT_CALLBACK
+}
+
+fn default_chatgpt_agent_name() -> String {
+    DEFAULT_CHATGPT_AGENT_NAME.to_owned()
 }
 
 /// Whole seconds written as `"120s"`.
@@ -299,6 +341,50 @@ impl Config {
             claude.upstream = upstream.to_string();
             if !claude.upstream.ends_with('/') {
                 claude.upstream.push('/');
+            }
+        }
+        if let Some(chatgpt) = &mut self.chatgpt {
+            if self.postgres.is_none() || self.credential_encryption.is_none() {
+                return Err(ConfigError(
+                    "chatgpt requires [postgres] and [credential_encryption]".into(),
+                ));
+            }
+            if self.routes.iter().any(|route| route.name == CHATGPT_ROUTE) {
+                return Err(ConfigError(
+                    "route chatgpt: prefix /chatgpt is reserved when [chatgpt] is enabled".into(),
+                ));
+            }
+            let url_error = |field: &str| {
+                ConfigError(format!(
+                    "chatgpt.{field} must be an http(s) URL without credentials, query or fragment"
+                ))
+            };
+            let issuer =
+                http_upstream(&chatgpt.auth_issuer).ok_or_else(|| url_error("auth_issuer"))?;
+            issuer
+                .as_str()
+                .trim_end_matches('/')
+                .clone_into(&mut chatgpt.auth_issuer);
+            let upstream = http_upstream(&chatgpt.upstream).ok_or_else(|| url_error("upstream"))?;
+            chatgpt.upstream = upstream.to_string();
+            if !chatgpt.upstream.ends_with('/') {
+                chatgpt.upstream.push('/');
+            }
+            if chatgpt.callback_listen.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+                return Err(ConfigError(
+                    "chatgpt.callback_listen must be a 127.0.0.1 address".into(),
+                ));
+            }
+            if chatgpt.agent_name.is_empty()
+                || chatgpt.agent_name.len() > MAX_AGENT_NAME_LENGTH
+                || !chatgpt
+                    .agent_name
+                    .bytes()
+                    .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+            {
+                return Err(ConfigError(
+                    "chatgpt.agent_name must be 1–64 printable ASCII characters".into(),
+                ));
             }
         }
         pool::validate(self)?;
