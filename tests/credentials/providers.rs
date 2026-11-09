@@ -1,7 +1,5 @@
 use super::*;
 
-const CHATGPT: &[u8] = b"fake-chatgpt-alice-credential-6";
-
 #[tokio::test]
 async fn one_persons_providers_have_independent_generations_and_encryption_contexts() {
     // Given Alice with an Anthropic and a ChatGPT credential.

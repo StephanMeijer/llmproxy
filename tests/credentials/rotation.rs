@@ -6,9 +6,19 @@ use std::{
 
 #[tokio::test]
 async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
-    // Given two old-key rows, with the second locked to stop the CLI between commits.
+    // Given two old-key Anthropic rows, the second locked to stop the CLI between commits,
+    // and an old-key ChatGPT row the same command must also rewrite.
     let (db, store, alice, bob) = setup().await;
     let credentials = service(&store, ring("old", &[("old", 1)]));
+    Credentials::new(
+        store.clone(),
+        Provider::ChatGpt,
+        ring("old", &[("old", 1)]),
+        SecretBytes::new(vec![9; 32]),
+    )
+    .install(alice, &SecretBytes::new(CHATGPT.to_vec()))
+    .await
+    .unwrap();
     credentials
         .install(alice, &SecretBytes::new(ALICE.to_vec()))
         .await
@@ -17,7 +27,7 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
         .install(bob, &SecretBytes::new(BOB.to_vec()))
         .await
         .unwrap();
-    assert_eq!(key_references(&db, "old").await, 2);
+    assert_eq!(key_references(&db, "old").await, 3);
     let config = encryption(&db);
     let text = format!(
         "{}\n[credential_encryption]\nfingerprint_key_file = '{}'\nactive_key_id='new'\n[credential_encryption.keys]\nold='{}'\nnew='{}'\n",
@@ -60,10 +70,10 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
         .output()
         .unwrap();
     assert!(restarted.status.success());
-    assert_eq!(restarted.stdout, b"{\"rewritten\":1,\"remaining\":0}\n");
+    assert_eq!(restarted.stdout, b"{\"rewritten\":2,\"remaining\":0}\n");
     // Then only the new key is referenced, both secrets survive, and another run is a no-op.
     assert_eq!(key_references(&db, "old").await, 0);
-    assert_eq!(key_references(&db, "new").await, 2);
+    assert_eq!(key_references(&db, "new").await, 3);
     let repeated = Credentials::open(store.clone(), Provider::Anthropic, &config)
         .unwrap()
         .reencrypt()
@@ -86,10 +96,11 @@ async fn killed_rotation_restarts_idempotently_without_losing_credentials() {
     ] {
         assert!(!bytes.windows(ALICE.len()).any(|v| v == ALICE));
         assert!(!bytes.windows(BOB.len()).any(|v| v == BOB));
+        assert!(!bytes.windows(CHATGPT.len()).any(|v| v == CHATGPT));
     }
     artifact("rotation-argv.bin", &argv);
     artifact("rotation-stdout.txt", &restarted.stdout);
-    artifact("rotation.txt", b"PASS: killed real CLI after one commit with second row locked; restarted rewrites one remaining row; repeat rewrites zero; old references zero; new-only ring decrypts both rows; argv/stdout/stderr contain no seeded credential\n");
+    artifact("rotation.txt", b"PASS: killed real CLI after one commit with second row locked; restarted rewrites the remaining Anthropic and ChatGPT rows; repeat rewrites zero; old references zero; new-only ring decrypts both rows; argv/stdout/stderr contain no seeded credential\n");
     for path in config.keys.values().chain([&config.fingerprint_key_file]) {
         fs::remove_file(path).unwrap();
     }

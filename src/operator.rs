@@ -158,11 +158,18 @@ async fn execute(
                 active_key_id: target.to_owned(),
                 ..encryption(config)?.clone()
             };
-            let counts = Credentials::open(store.clone(), Provider::Anthropic, &encryption)?
-                .reencrypt()
-                .await?;
+            let mut rewritten = 0_u64;
+            let mut remaining = 0;
+            for provider in [Provider::Anthropic, Provider::ChatGpt] {
+                let counts = Credentials::open(store.clone(), provider, &encryption)?
+                    .reencrypt()
+                    .await?;
+                rewritten = rewritten.saturating_add(counts.rewritten);
+                // Counts every provider's rows, so the last pass reports the whole namespace.
+                remaining = counts.remaining;
+            }
             Ok(Output::Metadata(
-                json!({"rewritten": counts.rewritten, "remaining": counts.remaining}),
+                json!({"rewritten": rewritten, "remaining": remaining}),
             ))
         }
     }

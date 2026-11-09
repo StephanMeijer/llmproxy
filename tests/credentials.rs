@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 const ALICE: &[u8] = b"fake-anthropic-alice-credential-6";
 const BOB: &[u8] = b"fake-anthropic-bob-credential-6";
+const CHATGPT: &[u8] = b"fake-chatgpt-alice-credential-6";
 
 fn ring(active: &str, keys: &[(&str, u8)]) -> KeyRing {
     KeyRing::new(
