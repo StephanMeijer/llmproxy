@@ -81,6 +81,17 @@ With the Claude adapter enabled, limits matching `/claude/` use PostgreSQL admis
 
 Definitions persist in PostgreSQL. Restarting all replicas with a changed definition under the same name does not overwrite a conflicting stored definition. There is no online limit migration command; retain compatible definitions until an explicit drained deployment/state migration has been planned.
 
+### `[chatgpt]`
+
+Validated by `--check-config` but **sign-in and route not served yet** ([#31](https://github.com/StephanMeijer/llmproxy/issues/31)). Like `[claude]`, it requires `[postgres]` and `[credential_encryption]`, and reserves the static route name `chatgpt`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `auth_issuer` | `"https://auth.openai.com"` | OpenAI's OpenID Connect issuer. `http(s)` without credentials, query or fragment; a trailing slash is dropped. |
+| `upstream` | `"https://api.openai.com/v1"` | `http(s)` base URL for inference, normalized with a trailing slash. |
+| `callback_listen` | `"127.0.0.1:1455"` | Sign-in callback listener. The address must be `127.0.0.1`: OpenAI refuses `localhost`, and other addresses are rejected. |
+| `agent_name` | `"llmproxy"` | Name shown on OpenAI's consent page; 1–64 printable ASCII characters. |
+
 ### Free-model pools: `[[pool]]`, `[[pool_provider]]`, `[[quota_domain]]`
 
 Validated by `--check-config` but **not served yet** ([#28](https://github.com/StephanMeijer/llmproxy/issues/28)). A pool fails over across free models and closes any route whose price is not proven zero by the provider's live catalog; see [`docs/pools.md`](docs/pools.md). With any of these sections present, the static route name `pools` is reserved.

@@ -814,3 +814,91 @@ fn pool_unknown_fields_values_and_missing_quota_are_rejected() {
         assert!(why.contains(expected), "{expected:?}: {why}");
     }
 }
+
+const CHATGPT: &str = "[chatgpt]\n";
+
+// A proxy with `[postgres]` creates its pool at construction, which needs a Tokio runtime.
+#[tokio::test]
+async fn chatgpt_defaults_and_explicit_settings_are_offline() -> Result<(), Box<dyn Error>> {
+    let config = Config::parse(&format!("{MINIMAL}{POSTGRES}{ENCRYPTION}{CHATGPT}"), lookup)?;
+    let chatgpt = config.chatgpt.as_ref().ok_or("missing chatgpt")?;
+    assert_eq!(chatgpt.auth_issuer, "https://auth.openai.com");
+    assert_eq!(chatgpt.upstream, "https://api.openai.com/v1/");
+    assert_eq!(chatgpt.callback_listen.to_string(), "127.0.0.1:1455");
+    assert_eq!(chatgpt.agent_name, "llmproxy");
+    Proxy::new(config)?;
+
+    let text = format!(
+        "{MINIMAL}{POSTGRES}{ENCRYPTION}{CHATGPT}auth_issuer = \"http://localhost:9/issuer/\"\n\
+         upstream = \"http://localhost:9/v1\"\ncallback_listen = \"127.0.0.1:0\"\n\
+         agent_name = \"My agent ~1\"\n"
+    );
+    let config = Config::parse(&text, lookup)?;
+    let chatgpt = config.chatgpt.as_ref().ok_or("missing chatgpt")?;
+    assert_eq!(chatgpt.auth_issuer, "http://localhost:9/issuer");
+    assert_eq!(chatgpt.upstream, "http://localhost:9/v1/");
+    assert_eq!(chatgpt.callback_listen.port(), 0);
+    assert_eq!(chatgpt.agent_name, "My agent ~1");
+    Proxy::new(config)?;
+    Ok(())
+}
+
+#[test]
+fn chatgpt_requires_storage_encryption_and_its_own_prefix() {
+    for sections in [
+        CHATGPT.to_owned(),
+        format!("{POSTGRES}{CHATGPT}"),
+        format!("{ENCRYPTION}{CHATGPT}"),
+    ] {
+        assert!(
+            refused(&sections).contains("chatgpt requires [postgres] and [credential_encryption]")
+        );
+    }
+    let route = "[[route]]\nname = \"chatgpt\"\nupstream = \"http://localhost\"\n";
+    assert!(
+        refused(&format!("{POSTGRES}{ENCRYPTION}{CHATGPT}{route}"))
+            .contains("prefix /chatgpt is reserved")
+    );
+}
+
+#[test]
+fn chatgpt_rejects_bad_urls_callbacks_and_agent_names() {
+    for url in [
+        "ftp://localhost",
+        "not a url",
+        "https://name:password@localhost",
+        "https://localhost?key=secret",
+    ] {
+        for field in ["auth_issuer", "upstream"] {
+            assert!(
+                refused(&format!(
+                    "{POSTGRES}{ENCRYPTION}{CHATGPT}{field} = \"{url}\"\n"
+                ))
+                .contains(&format!("chatgpt.{field} must be an http(s) URL"))
+            );
+        }
+    }
+    for listen in ["[::1]:1455", "0.0.0.0:1455", "127.0.0.2:1455"] {
+        assert!(
+            refused(&format!(
+                "{POSTGRES}{ENCRYPTION}{CHATGPT}callback_listen = \"{listen}\"\n"
+            ))
+            .contains("chatgpt.callback_listen must be a 127.0.0.1 address")
+        );
+    }
+    let long = "a".repeat(65);
+    for name in ["", "tab\there", "caf\u{e9}", long.as_str()] {
+        assert!(
+            refused(&format!(
+                "{POSTGRES}{ENCRYPTION}{CHATGPT}agent_name = \"{name}\"\n"
+            ))
+            .contains("chatgpt.agent_name must be 1–64 printable ASCII characters")
+        );
+    }
+    assert!(
+        refused(&format!(
+            "{POSTGRES}{ENCRYPTION}{CHATGPT}upsteam = \"http://h\"\n"
+        ))
+        .contains("unknown field")
+    );
+}
