@@ -1,0 +1,4 @@
+[advisories]
+# libsqlite3-sys is in Cargo.lock only through sqlx's sqlite driver, which no enabled feature builds
+# (`cargo tree -i libsqlite3-sys -e all` is empty), and sqlx =0.9.0 pins it. Drop this when bumping sqlx.
+ignore = ["RUSTSEC-2026-0459"]
