@@ -5,6 +5,7 @@
 )]
 
 use std::{
+    collections::{BTreeMap, VecDeque},
     fmt::Write,
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -13,8 +14,12 @@ use std::{
 
 use axum::{
     Router,
+    body::{Body, to_bytes},
     extract::{Request, State},
-    http::{StatusCode, header::AUTHORIZATION},
+    http::{
+        StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
+    },
     response::{IntoResponse, Response},
 };
 use llmproxy::{
@@ -35,21 +40,65 @@ const OPENROUTER_PAID: &str =
 const OPENCODE_CHAT_ONLY: &str = r#"{"data":[{"id":"free-model","api":{"chat-completions":{}},
     "cost":{"text":{"input":{"price":0},"output":{"price":0}}}}]}"#;
 
+const STREAM: [&str; 2] = ["data: {\"n\":1}\n\n", "data: [DONE]\n\n"];
+
 /// Every request the fake provider saw: path and `Authorization`.
 type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
-/// Serves a catalog per path prefix: `/<kind>/models`.
-async fn provider(State(seen): State<Seen>, req: Request) -> Response {
+#[derive(Clone, Default)]
+struct Fake {
+    seen: Seen,
+    /// Statuses the next completions of a kind answer with before plain `200`s.
+    script: Arc<Mutex<BTreeMap<String, VecDeque<u16>>>>,
+}
+
+/// Serves a catalog per path prefix, `/<kind>/models`, and completions that echo what arrived.
+async fn provider(State(fake): State<Fake>, req: Request) -> Response {
     let path = req.uri().path().to_owned();
     let auth = req
         .headers()
         .get(AUTHORIZATION)
         .map(|v| v.to_str().unwrap().to_owned());
-    seen.lock().unwrap().push((path.clone(), auth));
+    fake.seen.lock().unwrap().push((path.clone(), auth.clone()));
+    let kind = path.split('/').nth(1).unwrap_or_default().to_owned();
+    if !path.ends_with("/models") {
+        let next = fake
+            .script
+            .lock()
+            .unwrap()
+            .get_mut(&kind)
+            .and_then(VecDeque::pop_front);
+        let body = to_bytes(req.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        return match (kind.as_str(), next) {
+            (_, Some(429)) => {
+                (StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, "30")]).into_response()
+            }
+            (_, Some(code)) => StatusCode::from_u16(code).unwrap().into_response(),
+            ("slow", None) => {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                StatusCode::OK.into_response()
+            }
+            ("stream", None) => {
+                let chunks = STREAM.map(|c| Ok::<_, std::io::Error>(c.as_bytes()));
+                (
+                    [(CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(futures_util::stream::iter(chunks)),
+                )
+                    .into_response()
+            }
+            _ => json!({ "path": path, "auth": auth, "body": body })
+                .to_string()
+                .into_response(),
+        };
+    }
     match path.as_str() {
         "/free/models" => OPENROUTER_FREE.into_response(),
         "/paid/models" => OPENROUTER_PAID.into_response(),
         "/opencode/models" => OPENCODE_CHAT_ONLY.into_response(),
+        "/fail/models" | "/stream/models" | "/slow/models" | "/next/models" => {
+            OPENROUTER_FREE.into_response()
+        }
         "/garbage/models" => "not json".into_response(),
         "/huge/models" => vec![b' '; 9 << 20].into_response(),
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -66,22 +115,26 @@ async fn serve(app: Router) -> SocketAddr {
 struct Harness {
     base: String,
     metrics: String,
-    seen: Seen,
+    fake: Fake,
     client: reqwest::Client,
 }
 
 /// One provider and route per `(path kind, catalog, endpoint, model)`, all in pool `free`,
-/// in priority order; kind `dead` points at a port nothing listens on.
+/// in priority order; kind `dead` points at a port nothing listens on. Each route has its own
+/// quota domain of 2 requests per minute.
 async fn start(routes: &[(&str, &str, &str, &str)]) -> Harness {
-    let seen = Seen::default();
-    let addr = serve(Router::new().fallback(provider).with_state(seen.clone())).await;
+    let fake = Fake::default();
+    let addr = serve(Router::new().fallback(provider).with_state(fake.clone())).await;
     // Dropped at once, so nothing listens there.
     let dead = TcpListener::bind("127.0.0.1:0")
         .await
         .unwrap()
         .local_addr()
         .unwrap();
-    let mut text = format!("listen = \"127.0.0.1:0\"\nproxy_token = \"{TOKEN}\"\n");
+    let mut text = format!(
+        "listen = \"127.0.0.1:0\"\nproxy_token = \"{TOKEN}\"\nmax_body = 4096\n\
+         upstream_idle_timeout = \"1s\"\n"
+    );
     for (n, (kind, catalog, _, _)) in routes.iter().enumerate() {
         let host = if *kind == "dead" { dead } else { addr };
         write!(
@@ -96,7 +149,7 @@ catalog = "{catalog}"
 [[quota_domain]]
 name = "q{n}"
 provider = "p{n}"
-rpm = 10
+rpm = 2
 "#
         )
         .unwrap();
@@ -118,7 +171,7 @@ rpm = 10
     Harness {
         base: format!("http://{}", serve(router(proxy)).await),
         metrics,
-        seen,
+        fake,
         // A bug must fail a test, not hang it.
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
@@ -161,8 +214,63 @@ impl Harness {
     }
 
     fn seen(&self) -> Vec<(String, Option<String>)> {
-        self.seen.lock().unwrap().clone()
+        self.fake.seen.lock().unwrap().clone()
     }
+
+    /// The paths of every request other than catalog fetches.
+    fn calls(&self) -> Vec<String> {
+        self.seen()
+            .into_iter()
+            .map(|(path, _)| path)
+            .filter(|path| !path.ends_with("/models"))
+            .collect()
+    }
+
+    /// The next completions of `kind` answer with `codes` first.
+    fn script(&self, kind: &str, codes: &[u16]) {
+        self.fake
+            .script
+            .lock()
+            .unwrap()
+            .entry(kind.to_owned())
+            .or_default()
+            .extend(codes);
+    }
+
+    async fn post(&self, path: &str, body: &str, session: Option<&str>) -> reqwest::Response {
+        let mut req = self
+            .client
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(TOKEN)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_owned());
+        if let Some(session) = session {
+            req = req.header("x-llmproxy-session", session);
+        }
+        req.send().await.unwrap()
+    }
+
+    async fn chat(&self, session: Option<&str>) -> reqwest::Response {
+        self.post("/pools/free/chat/completions", CHAT_BODY, session)
+            .await
+    }
+}
+
+const CHAT_BODY: &str = r#"{"model":"anything","messages":[{"role":"user","content":"hi"}]}"#;
+
+async fn json(response: reqwest::Response) -> Value {
+    serde_json::from_str(&response.text().await.unwrap()).unwrap()
+}
+
+/// The route that served, and the fake's echo of what it received.
+async fn served(response: reqwest::Response) -> (String, String, Value) {
+    assert_eq!(response.status(), StatusCode::OK);
+    let header = |name| response.headers()[name].to_str().unwrap().to_owned();
+    let (route, priority) = (
+        header("x-llmproxy-pool-route"),
+        header("x-llmproxy-pool-priority"),
+    );
+    (route, priority, json(response).await)
 }
 
 #[tokio::test]
@@ -217,7 +325,7 @@ async fn every_route_closes_unless_its_catalog_proves_it_free() {
 }
 
 #[tokio::test]
-async fn pool_paths_need_the_token_and_send_nothing_upstream() {
+async fn pool_paths_need_the_token_and_unknown_ones_send_nothing_upstream() {
     let h = start(&[("free", "openrouter", "chat", MODEL)]).await;
     h.wait_for(&["eligible"]).await;
     let anonymous = h
@@ -235,9 +343,22 @@ async fn pool_paths_need_the_token_and_send_nothing_upstream() {
     ] {
         assert_eq!(h.get(path).await.status(), StatusCode::NOT_FOUND, "{path}");
     }
+    for (method, path) in [
+        (reqwest::Method::GET, "/pools/free/chat/completions"),
+        (reqwest::Method::PUT, "/pools/free/responses"),
+    ] {
+        let response = h
+            .client
+            .request(method, format!("{}{path}", h.base))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
     let post = h
         .client
-        .post(format!("{}/pools/free/chat/completions", h.base))
+        .post(format!("{}/pools/free/other", h.base))
         .bearer_auth(TOKEN)
         .body(r#"{"model":"free-model"}"#)
         .send()
@@ -261,4 +382,225 @@ async fn pool_paths_need_the_token_and_send_nothing_upstream() {
     assert!(metrics.contains(r#"llm3_http_requests_total{route="pool:free",code="200"}"#));
     assert!(metrics.contains(r#"llm3_http_requests_total{route="pool:free",code="404"}"#));
     assert!(metrics.contains(r#"llm3_http_requests_total{route="other",code="404"}"#));
+}
+
+#[tokio::test]
+async fn the_first_route_serves_with_its_model_and_the_provider_key() {
+    let h = start(&[
+        ("free", "openrouter", "chat", MODEL),
+        ("next", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "eligible"]).await;
+    let (route, priority, echo) = served(h.chat(None).await).await;
+    assert_eq!(route, "p0/free-model");
+    assert_eq!(priority, "0");
+    assert_eq!(echo["path"], "/free/chat/completions");
+    // The provider's key replaces the client's token, and the route's model replaces the body's.
+    assert_eq!(echo["auth"], PROVIDER_KEY);
+    assert_eq!(echo["body"]["model"], MODEL);
+    assert_eq!(echo["body"]["messages"][0]["content"], "hi");
+    assert_eq!(h.calls(), ["/free/chat/completions"]);
+}
+
+#[tokio::test]
+async fn a_server_error_or_timeout_fails_over_to_the_next_route() {
+    let h = start(&[
+        ("slow", "openrouter", "chat", MODEL),
+        ("fail", "openrouter", "chat", MODEL),
+        ("next", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "eligible", "eligible"]).await;
+    h.script("fail", &[500]);
+    let (route, priority, _) = served(h.chat(None).await).await;
+    assert_eq!((route.as_str(), priority.as_str()), ("p2/free-model", "2"));
+    assert_eq!(
+        h.calls(),
+        [
+            "/slow/chat/completions",
+            "/fail/chat/completions",
+            "/next/chat/completions"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_429_skips_the_quota_domain_until_retry_after() {
+    let h = start(&[
+        ("fail", "openrouter", "chat", MODEL),
+        ("next", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "eligible"]).await;
+    h.script("fail", &[429]);
+    assert_eq!(served(h.chat(None).await).await.0, "p1/free-model");
+    // The domain cools down, so the next request goes straight to the second route.
+    assert_eq!(served(h.chat(None).await).await.0, "p1/free-model");
+    assert_eq!(
+        h.calls(),
+        [
+            "/fail/chat/completions",
+            "/next/chat/completions",
+            "/next/chat/completions"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_provider_key_cools_the_route_down() {
+    let h = start(&[
+        ("fail", "openrouter", "chat", MODEL),
+        ("free", "openrouter", "chat", MODEL),
+        ("next", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "eligible", "eligible"]).await;
+    h.script("fail", &[401]);
+    h.script("free", &[403]);
+    assert_eq!(served(h.chat(None).await).await.0, "p2/free-model");
+    assert_eq!(served(h.chat(None).await).await.0, "p2/free-model");
+    assert_eq!(
+        h.calls(),
+        [
+            "/fail/chat/completions",
+            "/free/chat/completions",
+            "/next/chat/completions",
+            "/next/chat/completions"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_session_stays_on_its_route_after_the_first_recovers() {
+    let h = start(&[
+        ("fail", "openrouter", "chat", MODEL),
+        ("next", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "eligible"]).await;
+    h.script("fail", &[500]);
+    assert_eq!(served(h.chat(Some("abc")).await).await.0, "p1/free-model");
+    // The first route works again, but the session keeps its route.
+    assert_eq!(served(h.chat(Some("abc")).await).await.0, "p1/free-model");
+    // An invalid header is ignored, so priority order applies.
+    assert_eq!(
+        served(h.chat(Some("has space")).await).await.0,
+        "p0/free-model"
+    );
+}
+
+#[tokio::test]
+async fn a_pinned_route_that_stops_being_a_candidate_falls_through() {
+    let h = start(&[
+        ("fail", "openrouter", "chat", MODEL),
+        ("next", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "eligible"]).await;
+    h.script("fail", &[500]);
+    assert_eq!(served(h.chat(Some("abc")).await).await.0, "p1/free-model");
+    assert_eq!(served(h.chat(Some("abc")).await).await.0, "p1/free-model");
+    // Its quota of 2 per minute is spent, so the session moves on and stays there.
+    assert_eq!(served(h.chat(Some("abc")).await).await.0, "p0/free-model");
+}
+
+#[tokio::test]
+async fn requests_that_could_cost_money_are_refused_before_any_upstream_call() {
+    let h = start(&[("free", "openrouter", "chat", MODEL)]).await;
+    h.wait_for(&["eligible"]).await;
+    for body in [
+        r#"{"plugins":[]}"#,
+        r#"{"web_search_options":{}}"#,
+        r#"{"model":"free-model:online"}"#,
+        r#"{"provider":{"order":["x"]}}"#,
+        r#"{"models":["a","b"]}"#,
+        r#"{"route":"fallback"}"#,
+        "[]",
+        "not json",
+    ] {
+        let response = h.post("/pools/free/chat/completions", body, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        let error: Value = json(response).await;
+        assert_eq!(error["error"]["type"], "bad_request", "{body}");
+    }
+    let huge = format!(r#"{{"x":"{}"}}"#, "a".repeat(5000));
+    let response = h.post("/pools/free/chat/completions", &huge, None).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(h.calls().is_empty(), "{:?}", h.calls());
+}
+
+#[tokio::test]
+async fn a_route_without_free_proof_is_never_called() {
+    let h = start(&[
+        ("paid", "openrouter", "chat", MODEL),
+        ("free", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["closed: not free", "eligible"]).await;
+    assert_eq!(served(h.chat(None).await).await.0, "p1/free-model");
+    assert_eq!(h.calls(), ["/free/chat/completions"]);
+}
+
+#[tokio::test]
+async fn a_stream_is_relayed_as_it_arrives() {
+    let h = start(&[("stream", "openrouter", "chat", MODEL)]).await;
+    h.wait_for(&["eligible"]).await;
+    let response = h.chat(None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
+    assert_eq!(response.headers()["x-llmproxy-pool-route"], "p0/free-model");
+    assert_eq!(response.text().await.unwrap(), STREAM.concat());
+}
+
+#[tokio::test]
+async fn nothing_left_to_try_is_pool_exhausted_with_retry_after() {
+    let h = start(&[
+        ("paid", "openrouter", "chat", MODEL),
+        ("fail", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["closed: not free", "eligible"]).await;
+    // A 5xx leaves no wait to report, a spent quota does.
+    for codes in [[500], [500]] {
+        h.script("fail", &codes);
+        let response = h.chat(None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry: u64 = response.headers()[RETRY_AFTER]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(retry >= 1, "{retry}");
+        let error: Value = json(response).await;
+        assert_eq!(error["error"]["type"], "pool_exhausted");
+    }
+    let response = h.chat(None).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let retry: u64 = response.headers()[RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=30).contains(&retry), "{retry}");
+    assert_eq!(h.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn responses_go_only_to_routes_that_declare_them() {
+    let h = start(&[
+        ("free", "openrouter", "chat", MODEL),
+        ("opencode", "opencode", "responses", MODEL),
+        ("next", "openrouter", "responses", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "closed: endpoint not in catalog", "eligible"])
+        .await;
+    let response = h
+        .post("/pools/free/responses", r#"{"input":"hi"}"#, None)
+        .await;
+    let (route, priority, echo) = served(response).await;
+    assert_eq!((route.as_str(), priority.as_str()), ("p2/free-model", "2"));
+    assert_eq!(echo["path"], "/next/responses");
+    assert_eq!(h.calls(), ["/next/responses"]);
 }

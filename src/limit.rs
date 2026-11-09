@@ -16,7 +16,7 @@ pub mod shared;
 
 const SECS_PER_MINUTE: f64 = 60.0;
 
-struct Bucket {
+pub(crate) struct Bucket {
     capacity: f64,
     per_sec: f64,
     level: f64,
@@ -49,7 +49,7 @@ mod accounting_comparison {
 }
 
 impl Bucket {
-    fn new(per_minute: u32, burst: u32) -> Self {
+    pub(crate) fn new(per_minute: u32, burst: u32) -> Self {
         let capacity = f64::from(per_minute) + f64::from(burst);
         Self {
             capacity,
@@ -69,7 +69,7 @@ impl Bucket {
     }
 
     /// Cost beyond capacity is clamped, so an oversized request waits for a full bucket instead of forever.
-    fn wait(&mut self, cost: f64) -> Duration {
+    pub(crate) fn wait(&mut self, cost: f64) -> Duration {
         self.refill();
         let missing = cost.min(self.capacity) - self.level;
         if missing <= 0.0 {
@@ -79,7 +79,7 @@ impl Bucket {
         }
     }
 
-    fn take(&mut self, cost: f64) {
+    pub(crate) fn take(&mut self, cost: f64) {
         self.refill();
         self.level -= cost.min(self.capacity);
     }

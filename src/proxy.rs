@@ -445,7 +445,7 @@ impl Proxy {
             Err(failure) => return (LABEL_OTHER, auth_failure(failure, self.max_wait)),
         }
         if self.pools.owns(parts.uri.path()) {
-            return self.pools.serve(&parts.method, parts.uri.path());
+            return self.pools.serve(self, &parts, body).await;
         }
         if kind == RouteKind::Claude {
             if parts.uri.path() != claude::MESSAGES_PATH || parts.method != Method::POST {

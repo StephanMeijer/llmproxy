@@ -1,4 +1,4 @@
-//! Free-model pools: schema and offline validation (see `docs/pools.md`). Not served yet.
+//! Free-model pools: schema and offline validation (see `docs/pools.md`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
