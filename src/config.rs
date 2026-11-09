@@ -304,8 +304,8 @@ impl Config {
 
 impl PostgresConfig {
     /// Whether the driver would connect to a non-local host without verifying its certificate and
-    /// name. Parsed like the runtime parses it, so `PGSSLMODE` and `PGHOST` count; a URL the driver
-    /// rejects is reported when storage is built instead.
+    /// name. Parsed like the runtime parses it, so `PGSSLMODE` counts; a URL the driver rejects is
+    /// reported when storage is built instead.
     #[must_use]
     pub fn unverified_remote(&self) -> bool {
         PgConnectOptions::from_str(&self.url).is_ok_and(|options| {
