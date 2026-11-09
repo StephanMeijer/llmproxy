@@ -11,6 +11,7 @@ use axum::{
     http::{HeaderName, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
+use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
 use tokio::time::sleep;
 
@@ -20,8 +21,10 @@ use crate::{
     limit::Bucket,
 };
 
+mod charge;
 mod proof;
 
+use charge::Charge;
 use proof::ModelProof;
 
 const POOLS_PREFIX: &str = "/pools/";
@@ -53,6 +56,103 @@ const REFUSED_FIELDS: [&str; 5] = [
 /// A model suffix that adds paid web search.
 const ONLINE_SUFFIX: &str = ":online";
 
+const REQUESTS: &str = "llm3_pool_requests_total";
+const ATTEMPTS: &str = "llm3_pool_attempts_total";
+const AUTH_FAILURES: &str = "llm3_pool_auth_failures_total";
+const CHARGED: &str = "llm3_pool_charged_responses_total";
+const HELP: [(&str, &str); 4] = [
+    (
+        REQUESTS,
+        "Pool requests by outcome: served, exhausted or rejected.",
+    ),
+    (ATTEMPTS, "Pool upstream attempts by route and result."),
+    (
+        AUTH_FAILURES,
+        "Pool attempts whose provider refused the key (401 or 403).",
+    ),
+    (
+        CHARGED,
+        "Relayed pool responses that reported a cost above zero; alert on any increase.",
+    ),
+];
+
+/// Pool counters by metric and rendered labels; every label value comes from config.
+#[derive(Default)]
+pub struct Counters(Mutex<BTreeMap<(&'static str, String), u64>>);
+
+impl Counters {
+    fn add(&self, metric: &'static str, labels: &[(&str, &str)], n: u64) {
+        let labels = labels
+            .iter()
+            .map(|(k, v)| format!("{k}=\"{}\"", escape(v)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut counts = lock(&self.0);
+        let count = counts.entry((metric, labels)).or_default();
+        *count = count.saturating_add(n);
+        drop(counts);
+    }
+
+    pub fn render(&self) -> String {
+        let counts = lock(&self.0);
+        HELP.iter()
+            .map(|(name, help)| {
+                let rows = counts
+                    .iter()
+                    .filter(|((metric, _), _)| metric == name)
+                    .map(|((_, labels), n)| format!("{name}{{{labels}}} {n}\n"))
+                    .collect::<Vec<_>>()
+                    .concat();
+                format!("# HELP {name} {help}\n# TYPE {name} counter\n{rows}")
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    }
+}
+
+/// A Prometheus label value: backslash, double quote and newline escaped.
+fn escape(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('"', r#"\""#)
+        .replace('\n', r"\n")
+}
+
+/// Watches one relayed response for a charge the provider reports.
+struct Meter {
+    charge: Charge,
+    counters: Arc<Counters>,
+    pool: String,
+    route: String,
+}
+
+impl Meter {
+    /// Reads a chunk, or what is left at the end of the body when `None`.
+    fn read(&mut self, chunk: Option<&[u8]>) {
+        let charged = match chunk {
+            Some(chunk) => self.charge.feed(chunk),
+            None => self.charge.finish(),
+        };
+        if charged {
+            let labels = [("pool", self.pool.as_str()), ("route", &self.route)];
+            self.counters.add(CHARGED, &labels, 1);
+            tracing::error!(
+                pool = self.pool,
+                route = self.route,
+                "pool response reported a non-zero charge"
+            );
+        }
+    }
+}
+
+/// The body ends, or the client leaves; hyper may drop a body of known length without polling
+/// it to the end, so the rest is read here.
+impl Drop for Meter {
+    fn drop(&mut self) {
+        self.read(None);
+    }
+}
+
 /// `(pool index, session)` to `(route index, when it last served)`.
 type Sessions = HashMap<(usize, String), (usize, Instant)>;
 
@@ -78,6 +178,8 @@ struct PoolRoute {
     priority: u32,
     provider: Arc<Provider>,
     model: String,
+    /// `<provider>/<model>`: the route header and metric label.
+    label: String,
     endpoints: Vec<Endpoint>,
     quota: Arc<Mutex<Quota>>,
     /// Set when the provider refused its key.
@@ -94,6 +196,7 @@ struct Pool {
 pub struct Pools {
     providers: Vec<Arc<Provider>>,
     configured: Vec<Pool>,
+    counters: Arc<Counters>,
     // shortcut: per-process affinity, upgrade when sticky routing isn't available
     sessions: Mutex<Sessions>,
     /// When the refresh task fetches catalogs next; now until it has started.
@@ -144,6 +247,7 @@ impl Pools {
                             priority: r.priority,
                             provider: Arc::clone(provider),
                             model: r.model.clone(),
+                            label: format!("{}/{}", r.provider, r.model),
                             endpoints: r.endpoints.clone(),
                             quota: Arc::clone(quotas.get(r.quota.as_str())?),
                             cooldown: Mutex::new(None),
@@ -157,13 +261,42 @@ impl Pools {
                     routes,
                 }
             })
-            .collect();
+            .collect::<Vec<Pool>>();
+        let counters = Arc::<Counters>::default();
+        // Zero from the start, so the first charge or refused key is an increase.
+        for pool in &pools {
+            for route in &pool.routes {
+                let labels = [("pool", pool.name.as_str()), ("route", &route.label)];
+                counters.add(CHARGED, &labels, 0);
+                counters.add(AUTH_FAILURES, &labels, 0);
+            }
+        }
         Ok(Self {
             providers,
             configured: pools,
+            counters,
             sessions: Mutex::default(),
             next_refresh: Mutex::new(Instant::now()),
         })
+    }
+
+    /// The pool counters, rendered by the metrics listener.
+    pub const fn counters(&self) -> &Arc<Counters> {
+        &self.counters
+    }
+
+    fn outcome(&self, pool: &Pool, outcome: &str) {
+        let labels = [("pool", pool.name.as_str()), ("outcome", outcome)];
+        self.counters.add(REQUESTS, &labels, 1);
+    }
+
+    fn attempted(&self, pool: &Pool, route: &PoolRoute, result: &str) {
+        let labels = [("pool", pool.name.as_str()), ("route", &route.label)];
+        if result == "auth_failure" {
+            self.counters.add(AUTH_FAILURES, &labels, 1);
+        }
+        let labels = [labels[0], labels[1], ("result", result)];
+        self.counters.add(ATTEMPTS, &labels, 1);
     }
 
     /// Whether `path` is a pool path; only when pools are configured.
@@ -194,6 +327,7 @@ impl Pools {
             _ => return (&pool.label, not_found()),
         };
         let Ok(body) = to_bytes(body, proxy.max_body).await else {
+            self.outcome(pool, "rejected");
             return (
                 &pool.label,
                 error(
@@ -204,7 +338,10 @@ impl Pools {
             );
         };
         let response = match refused(&body) {
-            Err(message) => error(StatusCode::BAD_REQUEST, "bad_request", message),
+            Err(message) => {
+                self.outcome(pool, "rejected");
+                error(StatusCode::BAD_REQUEST, "bad_request", message)
+            }
             Ok(body) => {
                 let session = parts
                     .headers
@@ -279,33 +416,31 @@ impl Pools {
             let upstream = match sent {
                 Ok(upstream) => upstream,
                 Err(e) => {
+                    self.attempted(pool, route, "failover_error");
                     tracing::warn!(pool = pool.name, provider = provider.name, model = route.model, error = ?e.without_url(), "pool route failed, trying the next");
                     continue;
                 }
             };
             let status = upstream.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
+                self.attempted(pool, route, "failover_429");
                 let rest_for = retry_after(upstream.headers()).unwrap_or(QUOTA_COOLDOWN);
                 lock(&route.quota).cooldown = Some(Instant::now() + rest_for);
                 wait(rest_for);
             } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                self.attempted(pool, route, "auth_failure");
                 *lock(&route.cooldown) = Some(Instant::now() + AUTH_COOLDOWN);
                 wait(AUTH_COOLDOWN);
             } else if !status.is_server_error() {
+                self.attempted(pool, route, "ok");
+                self.outcome(pool, "served");
                 if let Some(key) = session {
                     remember(&mut lock(&self.sessions), key, index, Instant::now());
                 }
-                let upstream_headers = upstream.headers().clone();
-                let body = Body::from_stream(upstream.bytes_stream());
-                let mut response = relay(provider, status, upstream_headers, 0, 0, body);
-                let headers = response.headers_mut();
-                if let Ok(value) =
-                    HeaderValue::try_from(format!("{}/{}", provider.name, route.model))
-                {
-                    headers.insert(ROUTE_HEADER, value);
-                }
-                headers.insert(PRIORITY_HEADER, HeaderValue::from(route.priority));
-                return response;
+                return self.relayed(pool, route, upstream);
+            }
+            if status.is_server_error() {
+                self.attempted(pool, route, "failover_5xx");
             }
             tracing::warn!(
                 pool = pool.name,
@@ -315,6 +450,7 @@ impl Pools {
                 "pool route failed, trying the next"
             );
         }
+        self.outcome(pool, "exhausted");
         let soonest = soonest.unwrap_or_default();
         let secs = (soonest.as_secs() + u64::from(soonest.subsec_nanos() > 0)).max(1);
         let mut response = error(
@@ -325,6 +461,37 @@ impl Pools {
         response
             .headers_mut()
             .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+        response
+    }
+
+    /// Relays the upstream answer with the route headers, counting any charge it reports.
+    fn relayed(&self, pool: &Pool, route: &PoolRoute, upstream: reqwest::Response) -> Response {
+        let status = upstream.status();
+        let upstream_headers = upstream.headers().clone();
+        let sse = upstream_headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream"));
+        let mut meter = Meter {
+            charge: Charge::new(sse),
+            counters: Arc::clone(&self.counters),
+            pool: pool.name.clone(),
+            route: route.label.clone(),
+        };
+        // The bytes pass unchanged; the meter only reads them.
+        let chunks = upstream.bytes_stream().map(move |chunk| {
+            if let Ok(bytes) = &chunk {
+                meter.read(Some(bytes));
+            }
+            chunk
+        });
+        let body = Body::from_stream(chunks);
+        let mut response = relay(&route.provider.route, status, upstream_headers, 0, 0, body);
+        let headers = response.headers_mut();
+        if let Ok(value) = HeaderValue::try_from(route.label.as_str()) {
+            headers.insert(ROUTE_HEADER, value);
+        }
+        headers.insert(PRIORITY_HEADER, HeaderValue::from(route.priority));
         response
     }
 
@@ -534,8 +701,8 @@ async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::{
-        Duration, Endpoint, Instant, MAX_SESSIONS, ModelProof, PROOF_VALID_FOR, SESSION_TTL,
-        Sessions, jitter, pinned, remember, status,
+        ATTEMPTS, Counters, Duration, Endpoint, Instant, MAX_SESSIONS, ModelProof, PROOF_VALID_FOR,
+        SESSION_TTL, Sessions, jitter, pinned, remember, status,
     };
 
     const CHAT: &[Endpoint] = &[Endpoint::Chat];
@@ -621,5 +788,16 @@ mod tests {
     #[test]
     fn jitter_stays_within_thirty_seconds() {
         assert!(jitter() <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn label_values_cannot_break_the_text_format() {
+        let counters = Counters::default();
+        counters.add(ATTEMPTS, &[("route", "p/a:free\"\\\n")], 1);
+        assert!(
+            counters
+                .render()
+                .contains("llm3_pool_attempts_total{route=\"p/a:free\\\"\\\\\\n\"} 1\n")
+        );
     }
 }

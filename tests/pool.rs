@@ -41,6 +41,14 @@ const OPENCODE_CHAT_ONLY: &str = r#"{"data":[{"id":"free-model","api":{"chat-com
     "cost":{"text":{"input":{"price":0},"output":{"price":0}}}}]}"#;
 
 const STREAM: [&str; 2] = ["data: {\"n\":1}\n\n", "data: [DONE]\n\n"];
+const CHARGED: &str = r#"{"usage":{"cost":0.0002}}"#;
+const FREE: &str = r#"{"usage":{"cost":0}}"#;
+/// The cost sits in a `data:` line that two chunks split.
+const CHARGED_STREAM: [&str; 3] = [
+    "data: {\"n\":1}\n\ndata: {\"usage\":{\"co",
+    "st\":0.0002}}\n\n",
+    "data: [DONE]\n\n",
+];
 
 /// Every request the fake provider saw: path and `Authorization`.
 type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -79,30 +87,42 @@ async fn provider(State(fake): State<Fake>, req: Request) -> Response {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 StatusCode::OK.into_response()
             }
-            ("stream", None) => {
-                let chunks = STREAM.map(|c| Ok::<_, std::io::Error>(c.as_bytes()));
-                (
-                    [(CONTENT_TYPE, "text/event-stream")],
-                    Body::from_stream(futures_util::stream::iter(chunks)),
-                )
-                    .into_response()
-            }
+            ("stream", None) => sse(&STREAM),
+            ("charged-stream", None) => sse(&CHARGED_STREAM),
+            ("charged", None) => CHARGED.into_response(),
+            ("zero", None) => FREE.into_response(),
             _ => json!({ "path": path, "auth": auth, "body": body })
                 .to_string()
                 .into_response(),
         };
     }
     match path.as_str() {
-        "/free/models" => OPENROUTER_FREE.into_response(),
         "/paid/models" => OPENROUTER_PAID.into_response(),
         "/opencode/models" => OPENCODE_CHAT_ONLY.into_response(),
-        "/fail/models" | "/stream/models" | "/slow/models" | "/next/models" => {
-            OPENROUTER_FREE.into_response()
-        }
+        "/free/models"
+        | "/fail/models"
+        | "/stream/models"
+        | "/slow/models"
+        | "/next/models"
+        | "/charged/models"
+        | "/charged-stream/models"
+        | "/zero/models" => OPENROUTER_FREE.into_response(),
         "/garbage/models" => "not json".into_response(),
         "/huge/models" => vec![b' '; 9 << 20].into_response(),
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+fn sse(chunks: &[&'static str]) -> Response {
+    let chunks = chunks
+        .iter()
+        .map(|c| Ok::<_, std::io::Error>(c.as_bytes()))
+        .collect::<Vec<_>>();
+    (
+        [(CONTENT_TYPE, "text/event-stream")],
+        Body::from_stream(futures_util::stream::iter(chunks)),
+    )
+        .into_response()
 }
 
 async fn serve(app: Router) -> SocketAddr {
@@ -248,6 +268,26 @@ impl Harness {
             req = req.header("x-llmproxy-session", session);
         }
         req.send().await.unwrap()
+    }
+
+    async fn metrics(&self) -> String {
+        let response = self.client.get(&self.metrics).send().await.unwrap();
+        response.text().await.unwrap()
+    }
+
+    /// Polls the metrics until each `series value` line is there, or fails after `POLL_FOR`;
+    /// a charge is counted as the body ends, which can be just after the client has it all.
+    async fn counts(&self, want: &[&str]) {
+        let deadline = Instant::now() + POLL_FOR;
+        loop {
+            let metrics = self.metrics().await;
+            let missing = want
+                .iter()
+                .find(|line| !metrics.contains(&format!("{line}\n")));
+            let Some(line) = missing else { return };
+            assert!(Instant::now() < deadline, "{line} not in\n{metrics}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     async fn chat(&self, session: Option<&str>) -> reqwest::Response {
@@ -401,6 +441,13 @@ async fn the_first_route_serves_with_its_model_and_the_provider_key() {
     assert_eq!(echo["body"]["model"], MODEL);
     assert_eq!(echo["body"]["messages"][0]["content"], "hi");
     assert_eq!(h.calls(), ["/free/chat/completions"]);
+    h.counts(&[
+        r#"llm3_pool_requests_total{pool="free",outcome="served"} 1"#,
+        r#"llm3_pool_attempts_total{pool="free",route="p0/free-model",result="ok"} 1"#,
+        r#"llm3_pool_charged_responses_total{pool="free",route="p0/free-model"} 0"#,
+        r#"llm3_pool_auth_failures_total{pool="free",route="p1/free-model"} 0"#,
+    ])
+    .await;
 }
 
 #[tokio::test]
@@ -423,6 +470,13 @@ async fn a_server_error_or_timeout_fails_over_to_the_next_route() {
             "/next/chat/completions"
         ]
     );
+    h.counts(&[
+        r#"llm3_pool_attempts_total{pool="free",route="p0/free-model",result="failover_error"} 1"#,
+        r#"llm3_pool_attempts_total{pool="free",route="p1/free-model",result="failover_5xx"} 1"#,
+        r#"llm3_pool_attempts_total{pool="free",route="p2/free-model",result="ok"} 1"#,
+        r#"llm3_pool_requests_total{pool="free",outcome="served"} 1"#,
+    ])
+    .await;
 }
 
 #[tokio::test]
@@ -445,6 +499,11 @@ async fn a_429_skips_the_quota_domain_until_retry_after() {
             "/next/chat/completions"
         ]
     );
+    h.counts(&[
+        r#"llm3_pool_attempts_total{pool="free",route="p0/free-model",result="failover_429"} 1"#,
+        r#"llm3_pool_attempts_total{pool="free",route="p1/free-model",result="ok"} 2"#,
+    ])
+    .await;
 }
 
 #[tokio::test]
@@ -469,6 +528,14 @@ async fn a_rejected_provider_key_cools_the_route_down() {
             "/next/chat/completions"
         ]
     );
+    h.counts(&[
+        r#"llm3_pool_attempts_total{pool="free",route="p0/free-model",result="auth_failure"} 1"#,
+        r#"llm3_pool_attempts_total{pool="free",route="p1/free-model",result="auth_failure"} 1"#,
+        r#"llm3_pool_auth_failures_total{pool="free",route="p0/free-model"} 1"#,
+        r#"llm3_pool_auth_failures_total{pool="free",route="p1/free-model"} 1"#,
+        r#"llm3_pool_auth_failures_total{pool="free",route="p2/free-model"} 0"#,
+    ])
+    .await;
 }
 
 #[tokio::test]
@@ -528,6 +595,8 @@ async fn requests_that_could_cost_money_are_refused_before_any_upstream_call() {
     let response = h.post("/pools/free/chat/completions", &huge, None).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(h.calls().is_empty(), "{:?}", h.calls());
+    h.counts(&[r#"llm3_pool_requests_total{pool="free",outcome="rejected"} 9"#])
+        .await;
 }
 
 #[tokio::test]
@@ -584,6 +653,8 @@ async fn nothing_left_to_try_is_pool_exhausted_with_retry_after() {
         .unwrap();
     assert!((1..=30).contains(&retry), "{retry}");
     assert_eq!(h.calls().len(), 2);
+    h.counts(&[r#"llm3_pool_requests_total{pool="free",outcome="exhausted"} 3"#])
+        .await;
 }
 
 #[tokio::test]
@@ -603,4 +674,57 @@ async fn responses_go_only_to_routes_that_declare_them() {
     assert_eq!((route.as_str(), priority.as_str()), ("p2/free-model", "2"));
     assert_eq!(echo["path"], "/next/responses");
     assert_eq!(h.calls(), ["/next/responses"]);
+}
+
+#[tokio::test]
+async fn all_routes_closed_counts_an_exhausted_request() {
+    let h = start(&[("paid", "openrouter", "chat", MODEL)]).await;
+    h.wait_for(&["closed: not free"]).await;
+    assert_eq!(h.chat(None).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    h.counts(&[r#"llm3_pool_requests_total{pool="free",outcome="exhausted"} 1"#])
+        .await;
+    let metrics = h.metrics().await;
+    for name in [
+        "llm3_pool_requests_total",
+        "llm3_pool_attempts_total",
+        "llm3_pool_auth_failures_total",
+        "llm3_pool_charged_responses_total",
+    ] {
+        assert!(
+            metrics.contains(&format!("# TYPE {name} counter\n")),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_reported_charge_is_counted_and_the_bytes_pass_unchanged() {
+    let h = start(&[
+        ("charged", "openrouter", "chat", MODEL),
+        ("charged-stream", "openrouter", "chat", MODEL),
+        ("zero", "openrouter", "chat", MODEL),
+    ])
+    .await;
+    h.wait_for(&["eligible", "eligible", "eligible"]).await;
+    let route = |n: usize| format!(r#"{{pool="free",route="p{n}/free-model"}}"#);
+    let charged =
+        |n: usize, count: u8| format!("llm3_pool_charged_responses_total{} {count}", route(n));
+    // Each route has 2 requests a minute; spending the earlier ones moves on to the next route.
+    for (n, body) in [
+        (0, CHARGED.to_owned()),
+        (0, CHARGED.to_owned()),
+        (1, CHARGED_STREAM.concat()),
+        (1, CHARGED_STREAM.concat()),
+        (2, FREE.to_owned()),
+    ] {
+        let response = h.chat(None).await;
+        assert_eq!(
+            response.headers()["x-llmproxy-pool-route"],
+            format!("p{n}/free-model")
+        );
+        assert_eq!(response.bytes().await.unwrap(), body.as_bytes());
+    }
+    let want = [charged(0, 2), charged(1, 2), charged(2, 0)];
+    h.counts(&want.iter().map(String::as_str).collect::<Vec<_>>())
+        .await;
 }

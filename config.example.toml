@@ -69,30 +69,31 @@ upstream = "https://opencode.ai/zen/v1"
 headers = { Authorization = "Bearer ${OPENCODE_API_KEY}", X-Api-Key = "" }
 # retry_429 = false
 
-# Free-model pools are validated but not served yet; see docs/pools.md.
-# [[pool_provider]]
-# name = "openrouter-pool"
-# upstream = "https://openrouter.ai/api/v1"
-# headers = { Authorization = "Bearer ${OPENROUTER_API_KEY}", X-Api-Key = "" }
-# catalog = "openrouter"
-#
-# [[quota_domain]]
-# name = "openrouter-free"
-# provider = "openrouter-pool"
-# rpm = 20
-#
-# [[pool]]
-# name = "free"
-#
-# [[pool.route]]
-# priority = 1
-# provider = "openrouter-pool"
-# model = "liquid/lfm-3-1.7b:free"
-# context = 262144
-# max_output = 8192
-# capabilities = ["tools", "schema"]
-# endpoints = ["chat"]
-# quota = "openrouter-free"
+# Free-model pools: one endpoint, /pools/<name>/, that fails over across models the provider's
+# live catalog proves free; see docs/pools.md.
+[[pool_provider]]
+name = "openrouter-pool"
+upstream = "https://openrouter.ai/api/v1"
+headers = { Authorization = "Bearer ${OPENROUTER_API_KEY}", X-Api-Key = "" }
+catalog = "openrouter"
+
+[[quota_domain]]
+name = "openrouter-free"
+provider = "openrouter-pool"
+rpm = 20
+
+[[pool]]
+name = "free"
+
+[[pool.route]]
+priority = 1
+provider = "openrouter-pool"
+model = "liquid/lfm-3-1.7b:free"
+context = 262144
+max_output = 8192
+capabilities = ["tools", "schema"]
+endpoints = ["chat"]
+quota = "openrouter-free"
 
 # Limits hold requests (FIFO) until budget frees. A request may match several limits.
 # Tokens are estimated as body bytes / 4. `max_inflight` caps concurrency instead of rate.
