@@ -84,6 +84,12 @@ async fn provider(State(fake): State<Fake>, req: Request) -> Response {
         let body = to_bytes(req.into_body(), usize::MAX).await.unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
         return match (kind.as_str(), next) {
+            ("bare", Some(429)) => StatusCode::TOO_MANY_REQUESTS.into_response(),
+            ("forever", Some(429)) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(RETRY_AFTER, "18446744073709551615")],
+            )
+                .into_response(),
             (_, Some(429)) => {
                 (StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, "30")]).into_response()
             }
@@ -109,6 +115,8 @@ async fn provider(State(fake): State<Fake>, req: Request) -> Response {
         | "/stream/models"
         | "/slow/models"
         | "/next/models"
+        | "/bare/models"
+        | "/forever/models"
         | "/charged/models"
         | "/charged-stream/models"
         | "/zero/models" => OPENROUTER_FREE.into_response(),
@@ -511,6 +519,27 @@ async fn a_429_skips_the_quota_domain_until_retry_after() {
     .await;
 }
 
+/// The `Retry-After` of the `503` that follows a `429` from `kind`'s only route.
+async fn exhausted_after_429(kind: &str) -> u64 {
+    let h = start(&[(kind, "openrouter", "chat", MODEL)]).await;
+    h.wait_for(&["eligible"]).await;
+    h.script(kind, &[429]);
+    let response = h.chat(None).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    response.headers()[RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn pool_exhausted_retry_after_follows_the_provider_within_a_cap() {
+    assert_eq!(exhausted_after_429("fail").await, 30);
+    assert_eq!(exhausted_after_429("bare").await, 60);
+    assert_eq!(exhausted_after_429("forever").await, 3600);
+}
+
 #[tokio::test]
 async fn a_rejected_provider_key_cools_the_route_down() {
     let h = start(&[
@@ -588,6 +617,14 @@ async fn requests_that_could_cost_money_are_refused_before_any_upstream_call() {
         r#"{"provider":{"order":["x"]}}"#,
         r#"{"models":["a","b"]}"#,
         r#"{"route":"fallback"}"#,
+        r#"{"tools":[{"type":"openrouter:web_search"}]}"#,
+        r#"{"tools":[{"type":"openrouter:web_fetch"}]}"#,
+        r#"{"tools":[{"type":"function","function":{"name":"f"}},{"type":"web_search_preview"}]}"#,
+        r#"{"tools":[{"type":"custom","name":"c"}]}"#,
+        r#"{"tools":["function"]}"#,
+        r#"{"tools":{"type":"function"}}"#,
+        r#"{"tool_choice":{"type":"web_search_preview"}}"#,
+        r#"{"tool_choice":"web_search"}"#,
         "[]",
         "not json",
     ] {
@@ -600,8 +637,45 @@ async fn requests_that_could_cost_money_are_refused_before_any_upstream_call() {
     let response = h.post("/pools/free/chat/completions", &huge, None).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(h.calls().is_empty(), "{:?}", h.calls());
-    h.counts(&[r#"llm3_pool_requests_total{pool="free",outcome="rejected"} 9"#])
+    h.counts(&[r#"llm3_pool_requests_total{pool="free",outcome="rejected"} 17"#])
         .await;
+    let function = r#"{"tools":[{"type":"function","function":{"name":"f"}}],
+        "tool_choice":{"type":"function","function":{"name":"f"}}}"#;
+    let response = h.post("/pools/free/chat/completions", function, None).await;
+    assert_eq!(served(response).await.0, "p0/free-model");
+    let auto = r#"{"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"auto"}"#;
+    let response = h.post("/pools/free/chat/completions", auto, None).await;
+    assert_eq!(served(response).await.0, "p0/free-model");
+}
+
+#[tokio::test]
+async fn responses_built_in_tools_are_refused_and_caller_tools_served() {
+    let h = start(&[("free", "openrouter", "responses", MODEL)]).await;
+    h.wait_for(&["eligible"]).await;
+    for tool in [
+        "web_search_preview",
+        "web_search",
+        "file_search",
+        "code_interpreter",
+        "image_generation",
+        "computer_use_preview",
+        "mcp",
+        "openrouter:web_search",
+    ] {
+        let tools = format!(r#"{{"input":"hi","tools":[{{"type":"{tool}"}}]}}"#);
+        let choice = format!(r#"{{"input":"hi","tool_choice":{{"type":"{tool}"}}}}"#);
+        for body in [tools, choice] {
+            let response = h.post("/pools/free/responses", &body, None).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+    }
+    assert!(h.calls().is_empty(), "{:?}", h.calls());
+    h.counts(&[r#"llm3_pool_requests_total{pool="free",outcome="rejected"} 16"#])
+        .await;
+    let caller = r#"{"input":"hi","tools":[{"type":"function","name":"f"},{"type":"custom","name":"c"}],
+        "tool_choice":{"type":"custom","name":"c"}}"#;
+    let response = h.post("/pools/free/responses", caller, None).await;
+    assert_eq!(served(response).await.0, "p0/free-model");
 }
 
 #[tokio::test]

@@ -43,6 +43,8 @@ const ROUTE_HEADER: HeaderName = HeaderName::from_static("x-llmproxy-pool-route"
 const PRIORITY_HEADER: HeaderName = HeaderName::from_static("x-llmproxy-pool-priority");
 /// How long a quota domain rests after a `429` without `Retry-After`.
 const QUOTA_COOLDOWN: Duration = Duration::from_mins(1);
+/// The longest a provider's `Retry-After` may rest a quota domain.
+const MAX_QUOTA_COOLDOWN: Duration = Duration::from_hours(1);
 /// How long a route rests after the provider refused its key.
 const AUTH_COOLDOWN: Duration = Duration::from_mins(5);
 /// Fields a zero price list does not cover, or that would let the body pick the route.
@@ -55,6 +57,12 @@ const REFUSED_FIELDS: [&str; 5] = [
 ];
 /// A model suffix that adds paid web search.
 const ONLINE_SUFFIX: &str = ":online";
+/// Tool types the caller runs itself; any other (`openrouter:web_search`, `web_search_preview`,
+/// `file_search`, ...) runs at the provider and may be billed.
+const CHAT_TOOLS: &[&str] = &["function"];
+const RESPONSES_TOOLS: &[&str] = &["function", "custom"];
+/// `tool_choice` strings that name no tool.
+const TOOL_CHOICE_MODES: [&str; 3] = ["auto", "none", "required"];
 
 const REQUESTS: &str = "llm3_pool_requests_total";
 const ATTEMPTS: &str = "llm3_pool_attempts_total";
@@ -337,7 +345,7 @@ impl Pools {
                 ),
             );
         };
-        let response = match refused(&body) {
+        let response = match refused(&body, endpoint) {
             Err(message) => {
                 self.outcome(pool, "rejected");
                 error(StatusCode::BAD_REQUEST, "bad_request", message)
@@ -429,8 +437,8 @@ impl Pools {
             let status = upstream.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
                 self.attempted(pool, route, "failover_429");
-                let rest_for = retry_after(upstream.headers()).unwrap_or(QUOTA_COOLDOWN);
-                lock(&route.quota).cooldown = Some(Instant::now() + rest_for);
+                let (rest_for, until) = quota_rest(retry_after(upstream.headers()), Instant::now());
+                lock(&route.quota).cooldown = Some(until);
                 wait(rest_for);
             } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
                 self.attempted(pool, route, "auth_failure");
@@ -507,8 +515,7 @@ impl Pools {
         if route_status(route, &[endpoint], now).0 != ELIGIBLE {
             return Err(lock(&self.next_refresh).saturating_duration_since(now));
         }
-        let until =
-            |at: Option<Instant>| at.map_or(Duration::ZERO, |at| at.saturating_duration_since(now));
+        let until = |at| remaining(at, now);
         let cooling = until(*lock(&route.cooldown));
         if !cooling.is_zero() {
             return Err(cooling);
@@ -528,8 +535,21 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// How long a quota domain rests after a `429` with `retry_after`, capped, and until when.
+fn quota_rest(retry_after: Option<Duration>, now: Instant) -> (Duration, Instant) {
+    let rest = retry_after
+        .unwrap_or(QUOTA_COOLDOWN)
+        .min(MAX_QUOTA_COOLDOWN);
+    (rest, now.checked_add(rest).unwrap_or(now))
+}
+
+/// Time left until `at` from `now`; zero once it has passed or when unset.
+fn remaining(at: Option<Instant>, now: Instant) -> Duration {
+    at.map_or(Duration::ZERO, |at| at.saturating_duration_since(now))
+}
+
 /// The body as a JSON object, or why it is refused before any upstream call.
-fn refused(body: &[u8]) -> Result<Map<String, Value>, &'static str> {
+fn refused(body: &[u8], endpoint: Endpoint) -> Result<Map<String, Value>, &'static str> {
     let Ok(Value::Object(body)) = serde_json::from_slice(body) else {
         return Err("request body must be a JSON object");
     };
@@ -544,6 +564,27 @@ fn refused(body: &[u8]) -> Result<Map<String, Value>, &'static str> {
         .is_some_and(|m| m.ends_with(ONLINE_SUFFIX))
     {
         return Err("a model ending in :online is not allowed in a pool request");
+    }
+    let allowed = match endpoint {
+        Endpoint::Chat => CHAT_TOOLS,
+        Endpoint::Responses => RESPONSES_TOOLS,
+    };
+    let caller_run = |tool: &Value| {
+        tool.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| allowed.contains(&t))
+    };
+    let tools_ok = body
+        .get("tools")
+        .is_none_or(|t| t.as_array().is_some_and(|t| t.iter().all(caller_run)));
+    let choice_ok = body.get("tool_choice").is_none_or(|c| {
+        c.as_str()
+            .map_or_else(|| caller_run(c), |c| TOOL_CHOICE_MODES.contains(&c))
+    });
+    if !tools_ok || !choice_ok {
+        return Err(
+            "only function tools (and custom tools on responses) are allowed in a pool request",
+        );
     }
     Ok(body)
 }
@@ -706,8 +747,9 @@ async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::{
-        ATTEMPTS, Counters, Duration, Endpoint, Instant, MAX_SESSIONS, ModelProof, PROOF_VALID_FOR,
-        SESSION_TTL, Sessions, jitter, pinned, remember, status,
+        ATTEMPTS, Counters, Duration, Endpoint, Instant, MAX_QUOTA_COOLDOWN, MAX_SESSIONS,
+        ModelProof, PROOF_VALID_FOR, QUOTA_COOLDOWN, SESSION_TTL, Sessions, jitter, pinned,
+        quota_rest, remaining, remember, status,
     };
 
     const CHAT: &[Endpoint] = &[Endpoint::Chat];
@@ -788,6 +830,37 @@ mod tests {
         assert_eq!(sessions.len(), MAX_SESSIONS);
         remember(&mut sessions, key(0), 1, start + SESSION_TTL * 2);
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn a_quota_cooldown_follows_retry_after_within_a_cap_and_ends() {
+        let now = Instant::now();
+        let secs = |s| Some(Duration::from_secs(s));
+        assert_eq!(
+            quota_rest(secs(30), now),
+            (Duration::from_secs(30), now + Duration::from_secs(30))
+        );
+        assert_eq!(
+            quota_rest(None, now),
+            (QUOTA_COOLDOWN, now + QUOTA_COOLDOWN)
+        );
+        // An absurd provider value neither panics nor rests the domain past the cap.
+        let (rest, until) = quota_rest(secs(u64::MAX), now);
+        assert_eq!(
+            (rest, until),
+            (MAX_QUOTA_COOLDOWN, now + MAX_QUOTA_COOLDOWN)
+        );
+        let (_, until) = quota_rest(secs(1), now);
+        assert_eq!(remaining(Some(until), now), Duration::from_secs(1));
+        assert_eq!(
+            remaining(Some(until), now + Duration::from_millis(400)),
+            Duration::from_millis(600)
+        );
+        assert_eq!(
+            remaining(Some(until), now + Duration::from_secs(2)),
+            Duration::ZERO
+        );
+        assert_eq!(remaining(None, now), Duration::ZERO);
     }
 
     #[test]
