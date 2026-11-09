@@ -101,6 +101,14 @@ Validated by `--check-config` but **not served yet** ([#28](https://github.com/S
 | | `endpoints` | At least one of `chat`, `responses`. |
 | | `quota` | A quota domain of the same provider. |
 
+Each provider's catalog is fetched at startup and every 10 minutes (plus up to 30 s of jitter), with the provider's headers, a 10 s timeout and an 8 MiB cap. Proof stays valid for 30 minutes after the fetch that produced it; a failed fetch keeps the old proof until then. `GET /pools/<pool>/models` (legacy `proxy_token`) shows each route's state:
+
+```json
+{"pool": "free", "routes": [{"priority": 1, "provider": "openrouter", "model": "…:free", "endpoints": ["chat"], "status": "eligible", "proof_valid_for_secs": 1712}]}
+```
+
+`status` is `eligible` or one of `closed: no proof` (no successful fetch yet), `closed: expired`, `closed: not free`, `closed: missing from catalog`, `closed: endpoint not in catalog` (opencode lists API kinds, and none of the route's `endpoints`). `proof_valid_for_secs` is `null` without valid proof. An unknown pool, and every other `/pools/` path, gets `404` until requests are served.
+
 ## Behaviour
 
 **Authentication.** `Authorization: Bearer <token>` or `x-api-key: <token>`. Legacy tokens are compared without short-circuiting on the first differing byte; personal tokens are verified against stored hashes, at most 4 at a time (one per CPU on smaller hosts); further personal-token requests queue in arrival order for up to 10 s (or `max_wait`, if shorter), then get `429`. Authentication runs before forwarding, so an unknown path without a token gets `401`, not `404`. Duplicate or conflicting authentication headers get `401`. `/healthz` needs no token.

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reqwest::header::{HeaderName, HeaderValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Config, ConfigError, http_upstream, valid_identifier};
 
@@ -74,7 +74,7 @@ pub enum Capability {
     Schema,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Endpoint {
     Chat,

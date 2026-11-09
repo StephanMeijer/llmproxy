@@ -339,6 +339,7 @@ pub struct Proxy {
     max_body: usize,
     tool_choice_prefix: Option<String>,
     routes: Vec<Route>,
+    pools: pool::Pools,
     limits: Limits,
     client: reqwest::Client,
     metrics: Metrics,
@@ -403,6 +404,7 @@ impl Proxy {
             )),
             _ => None,
         };
+        let pools = pool::Pools::new(&config)?;
         let auth = Authenticator::new(config.proxy_token, storage, config.max_wait);
         Ok(Self {
             auth,
@@ -412,6 +414,7 @@ impl Proxy {
             tool_choice_prefix: config.tool_choice_prefix,
             limits,
             routes,
+            pools,
             client,
             metrics,
         })
@@ -430,7 +433,7 @@ impl Proxy {
             .find_map(|r| Some((r, path.strip_prefix(&r.prefix)?)));
         let kind = if self.claude.is_some() && (path == "/claude" || path.starts_with("/claude/")) {
             RouteKind::Claude
-        } else if matched.is_some() {
+        } else if matched.is_some() || self.pools.owns(path) {
             RouteKind::Static
         } else {
             RouteKind::Unknown
@@ -441,16 +444,12 @@ impl Proxy {
             }
             Err(failure) => return (LABEL_OTHER, auth_failure(failure, self.max_wait)),
         }
+        if self.pools.owns(parts.uri.path()) {
+            return self.pools.serve(&parts.method, parts.uri.path());
+        }
         if kind == RouteKind::Claude {
             if parts.uri.path() != claude::MESSAGES_PATH || parts.method != Method::POST {
-                return (
-                    CLAUDE_ROUTE,
-                    error(
-                        StatusCode::NOT_FOUND,
-                        "not_found",
-                        "no route matches this path",
-                    ),
-                );
+                return (CLAUDE_ROUTE, not_found());
             }
             if let Some((adapter, route)) = &self.claude {
                 let rest = parts
@@ -463,14 +462,7 @@ impl Proxy {
             }
         }
         let Some((route, rest)) = matched else {
-            return (
-                LABEL_OTHER,
-                error(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "no route matches this path",
-                ),
-            );
+            return (LABEL_OTHER, not_found());
         };
         (
             &route.name,
@@ -820,6 +812,14 @@ fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn not_found() -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "no route matches this path",
+    )
+}
+
 fn error(status: StatusCode, kind: &str, message: &str) -> Response {
     let body = json!({ "error": { "type": kind, "message": message } });
     (
@@ -864,7 +864,9 @@ fn count_until_body_ends(response: Response, guard: impl Send + 'static) -> Resp
 }
 
 /// The client-facing app. Everything is a fallback so routes stay data, not code.
+/// Also starts the pool catalog refresh; `--check-config` never calls this, so it stays offline.
 pub fn router(proxy: Arc<Proxy>) -> Router {
+    pool::spawn_refresh(&proxy);
     Router::new().fallback(handle).with_state(proxy)
 }
 
