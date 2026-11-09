@@ -1,20 +1,24 @@
 //! Free-model pools: one endpoint that fails over across models proven free by their catalog.
 
 use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex, PoisonError, Weak},
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
-    http::{Method, StatusCode, header},
+    body::{Body, to_bytes},
+    http::{HeaderName, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::time::sleep;
 
-use super::{LABEL_OTHER, Proxy, Route, not_found, request_headers};
-use crate::config::{Catalog, Config, ConfigError, Endpoint, RouteConfig};
+use super::{LABEL_OTHER, Proxy, Route, error, not_found, relay, request_headers, retry_after};
+use crate::{
+    config::{Catalog, Config, ConfigError, Endpoint, RouteConfig},
+    limit::Bucket,
+};
 
 mod proof;
 
@@ -28,6 +32,29 @@ const PROOF_VALID_FOR: Duration = Duration::from_mins(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CATALOG_BYTES: usize = 8 << 20;
 const ELIGIBLE: &str = "eligible";
+const SESSION_HEADER: &str = "x-llmproxy-session";
+const MAX_SESSION_LEN: usize = 128;
+const MAX_SESSIONS: usize = 10_000;
+const SESSION_TTL: Duration = Duration::from_hours(1);
+const ROUTE_HEADER: HeaderName = HeaderName::from_static("x-llmproxy-pool-route");
+const PRIORITY_HEADER: HeaderName = HeaderName::from_static("x-llmproxy-pool-priority");
+/// How long a quota domain rests after a `429` without `Retry-After`.
+const QUOTA_COOLDOWN: Duration = Duration::from_mins(1);
+/// How long a route rests after the provider refused its key.
+const AUTH_COOLDOWN: Duration = Duration::from_mins(5);
+/// Fields a zero price list does not cover, or that would let the body pick the route.
+const REFUSED_FIELDS: [&str; 5] = [
+    "plugins",
+    "web_search_options",
+    "provider",
+    "models",
+    "route",
+];
+/// A model suffix that adds paid web search.
+const ONLINE_SUFFIX: &str = ":online";
+
+/// `(pool index, session)` to `(route index, when it last served)`.
+type Sessions = HashMap<(usize, String), (usize, Instant)>;
 
 /// The last catalog that parsed, and when it was fetched.
 struct Proof {
@@ -41,11 +68,20 @@ struct Provider {
     proof: Mutex<Option<Proof>>,
 }
 
+/// A quota domain's budget and `429` cooldown, shared by every route that draws on it.
+struct Quota {
+    bucket: Bucket,
+    cooldown: Option<Instant>,
+}
+
 struct PoolRoute {
     priority: u32,
     provider: Arc<Provider>,
     model: String,
     endpoints: Vec<Endpoint>,
+    quota: Arc<Mutex<Quota>>,
+    /// Set when the provider refused its key.
+    cooldown: Mutex<Option<Instant>>,
 }
 
 struct Pool {
@@ -57,7 +93,11 @@ struct Pool {
 
 pub struct Pools {
     providers: Vec<Arc<Provider>>,
-    pools: Vec<Pool>,
+    configured: Vec<Pool>,
+    // shortcut: per-process affinity, upgrade when sticky routing isn't available
+    sessions: Mutex<Sessions>,
+    /// When the refresh task fetches catalogs next; now until it has started.
+    next_refresh: Mutex<Instant>,
 }
 
 impl Pools {
@@ -80,6 +120,17 @@ impl Pools {
                 }))
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
+        let quotas: BTreeMap<&str, Arc<Mutex<Quota>>> = config
+            .quota_domains
+            .iter()
+            .map(|q| {
+                let quota = Quota {
+                    bucket: Bucket::new(q.rpm, 0),
+                    cooldown: None,
+                };
+                (q.name.as_str(), Arc::new(Mutex::new(quota)))
+            })
+            .collect();
         let pools = config
             .pools
             .iter()
@@ -94,6 +145,8 @@ impl Pools {
                             provider: Arc::clone(provider),
                             model: r.model.clone(),
                             endpoints: r.endpoints.clone(),
+                            quota: Arc::clone(quotas.get(r.quota.as_str())?),
+                            cooldown: Mutex::new(None),
                         })
                     })
                     .collect::<Vec<_>>();
@@ -105,59 +158,286 @@ impl Pools {
                 }
             })
             .collect();
-        Ok(Self { providers, pools })
+        Ok(Self {
+            providers,
+            configured: pools,
+            sessions: Mutex::default(),
+            next_refresh: Mutex::new(Instant::now()),
+        })
     }
 
     /// Whether `path` is a pool path; only when pools are configured.
     pub fn owns(&self, path: &str) -> bool {
-        !self.pools.is_empty() && (path == "/pools" || path.starts_with(POOLS_PREFIX))
+        !self.configured.is_empty() && (path == "/pools" || path.starts_with(POOLS_PREFIX))
     }
 
     /// Returns the metric label and the response for an authenticated pool path.
-    pub fn serve(&self, method: &Method, path: &str) -> (&str, Response) {
-        let rest = path.strip_prefix(POOLS_PREFIX).unwrap_or_default();
+    pub async fn serve(&self, proxy: &Proxy, parts: &Parts, body: Body) -> (&str, Response) {
+        let rest = parts
+            .uri
+            .path()
+            .strip_prefix(POOLS_PREFIX)
+            .unwrap_or_default();
         let (name, rest) = rest.split_once('/').unwrap_or((rest, ""));
-        let Some(pool) = self.pools.iter().find(|p| p.name == name) else {
+        let Some((index, pool)) = self
+            .configured
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.name == name)
+        else {
             return (LABEL_OTHER, not_found());
         };
-        // Nothing is sent upstream yet (#28).
-        if method != Method::GET || rest != "models" {
-            return (&pool.label, not_found());
-        }
-        let now = Instant::now();
-        let routes: Vec<Value> = pool
-            .routes
-            .iter()
-            .map(|r| {
-                let proof = r
-                    .provider
-                    .proof
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                let fetched = proof.as_ref().map(|p| (p.fetched, p.models.get(&r.model)));
-                let (status, left) = status(fetched, &r.endpoints, now);
-                drop(proof);
-                json!({
-                    "priority": r.priority,
-                    "provider": r.provider.route.name,
-                    "model": r.model,
-                    "endpoints": r.endpoints,
-                    "status": status,
-                    "proof_valid_for_secs": left.map(|d| d.as_secs()),
-                })
-            })
-            .collect();
-        let body = json!({ "pool": pool.name, "routes": routes });
-        (
-            &pool.label,
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.to_string(),
-            )
-                .into_response(),
-        )
+        let endpoint = match (parts.method.as_str(), rest) {
+            ("GET", "models") => return (&pool.label, models(pool)),
+            ("POST", "chat/completions") => Endpoint::Chat,
+            ("POST", "responses") => Endpoint::Responses,
+            _ => return (&pool.label, not_found()),
+        };
+        let Ok(body) = to_bytes(body, proxy.max_body).await else {
+            return (
+                &pool.label,
+                error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "body_too_large",
+                    "request body exceeds max_body or could not be read",
+                ),
+            );
+        };
+        let response = match refused(&body) {
+            Err(message) => error(StatusCode::BAD_REQUEST, "bad_request", message),
+            Ok(body) => {
+                let session = parts
+                    .headers
+                    .get(SESSION_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .filter(|s| {
+                        (1..=MAX_SESSION_LEN).contains(&s.len())
+                            && s.bytes().all(|b| b.is_ascii_graphic())
+                    })
+                    .map(|s| (index, s.to_owned()));
+                self.attempt(proxy, pool, endpoint, rest, parts, body, session)
+                    .await
+            }
+        };
+        (&pool.label, response)
     }
+
+    /// Tries the candidate routes in order, the session's route first, and relays the first
+    /// answer that is not a reason to fail over.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one request's parts, passed through once"
+    )]
+    async fn attempt(
+        &self,
+        proxy: &Proxy,
+        pool: &Pool,
+        endpoint: Endpoint,
+        rest: &str,
+        parts: &Parts,
+        mut body: Map<String, Value>,
+        session: Option<(usize, String)>,
+    ) -> Response {
+        let pinned = session
+            .as_ref()
+            .and_then(|key| pinned(&lock(&self.sessions), key, Instant::now()));
+        let order = pinned
+            .and_then(|i| Some((i, pool.routes.get(i)?)))
+            .into_iter()
+            .chain(
+                pool.routes
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| Some(*i) != pinned),
+            );
+        // The soonest any skipped route might take a request again.
+        let mut soonest: Option<Duration> = None;
+        let mut wait = |d: Duration| soonest = Some(soonest.map_or(d, |s| s.min(d)));
+        for (index, route) in order {
+            if !route.endpoints.contains(&endpoint) {
+                continue;
+            }
+            if let Err(blocked) = self.admit(route, endpoint) {
+                wait(blocked);
+                continue;
+            }
+            let provider = &route.provider.route;
+            body.insert("model".to_owned(), Value::String(route.model.clone()));
+            let mut headers = request_headers(parts, provider);
+            headers.remove(SESSION_HEADER);
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            let sent = proxy
+                .client
+                .post(format!("{}{rest}", provider.base))
+                .headers(headers)
+                .body(Value::Object(body.clone()).to_string())
+                .send()
+                .await;
+            let upstream = match sent {
+                Ok(upstream) => upstream,
+                Err(e) => {
+                    tracing::warn!(pool = pool.name, provider = provider.name, model = route.model, error = ?e.without_url(), "pool route failed, trying the next");
+                    continue;
+                }
+            };
+            let status = upstream.status();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let rest_for = retry_after(upstream.headers()).unwrap_or(QUOTA_COOLDOWN);
+                lock(&route.quota).cooldown = Some(Instant::now() + rest_for);
+                wait(rest_for);
+            } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                *lock(&route.cooldown) = Some(Instant::now() + AUTH_COOLDOWN);
+                wait(AUTH_COOLDOWN);
+            } else if !status.is_server_error() {
+                if let Some(key) = session {
+                    remember(&mut lock(&self.sessions), key, index, Instant::now());
+                }
+                let upstream_headers = upstream.headers().clone();
+                let body = Body::from_stream(upstream.bytes_stream());
+                let mut response = relay(provider, status, upstream_headers, 0, 0, body);
+                let headers = response.headers_mut();
+                if let Ok(value) =
+                    HeaderValue::try_from(format!("{}/{}", provider.name, route.model))
+                {
+                    headers.insert(ROUTE_HEADER, value);
+                }
+                headers.insert(PRIORITY_HEADER, HeaderValue::from(route.priority));
+                return response;
+            }
+            tracing::warn!(
+                pool = pool.name,
+                provider = provider.name,
+                model = route.model,
+                status = status.as_u16(),
+                "pool route failed, trying the next"
+            );
+        }
+        let soonest = soonest.unwrap_or_default();
+        let secs = (soonest.as_secs() + u64::from(soonest.subsec_nanos() > 0)).max(1);
+        let mut response = error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "pool_exhausted",
+            "no route of this pool can take the request now",
+        );
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+        response
+    }
+
+    /// Takes one request from the route's quota when it may serve `endpoint` now; otherwise
+    /// returns how long until it might.
+    fn admit(&self, route: &PoolRoute, endpoint: Endpoint) -> Result<(), Duration> {
+        let now = Instant::now();
+        if route_status(route, &[endpoint], now).0 != ELIGIBLE {
+            return Err(lock(&self.next_refresh).saturating_duration_since(now));
+        }
+        let until =
+            |at: Option<Instant>| at.map_or(Duration::ZERO, |at| at.saturating_duration_since(now));
+        let cooling = until(*lock(&route.cooldown));
+        if !cooling.is_zero() {
+            return Err(cooling);
+        }
+        let mut quota = lock(&route.quota);
+        let blocked = until(quota.cooldown).max(quota.bucket.wait(1.0));
+        if !blocked.is_zero() {
+            return Err(blocked);
+        }
+        quota.bucket.take(1.0);
+        drop(quota);
+        Ok(())
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The body as a JSON object, or why it is refused before any upstream call.
+fn refused(body: &[u8]) -> Result<Map<String, Value>, &'static str> {
+    let Ok(Value::Object(body)) = serde_json::from_slice(body) else {
+        return Err("request body must be a JSON object");
+    };
+    if REFUSED_FIELDS.iter().any(|f| body.contains_key(*f)) {
+        return Err(
+            "plugins, web_search_options, provider, models and route are not allowed in a pool request",
+        );
+    }
+    if body
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|m| m.ends_with(ONLINE_SUFFIX))
+    {
+        return Err("a model ending in :online is not allowed in a pool request");
+    }
+    Ok(body)
+}
+
+/// The session's route, while its entry is younger than `SESSION_TTL`.
+fn pinned(sessions: &Sessions, key: &(usize, String), now: Instant) -> Option<usize> {
+    let (route, at) = sessions.get(key)?;
+    (now.saturating_duration_since(*at) < SESSION_TTL).then_some(*route)
+}
+
+/// Records the route that served the session. When full, expired entries go first, then the
+/// oldest.
+fn remember(sessions: &mut Sessions, key: (usize, String), route: usize, now: Instant) {
+    if sessions.len() >= MAX_SESSIONS && !sessions.contains_key(&key) {
+        sessions.retain(|_, (_, at)| now.saturating_duration_since(*at) < SESSION_TTL);
+        let oldest = sessions
+            .iter()
+            .min_by_key(|(_, (_, at))| *at)
+            .map(|(k, _)| k.clone());
+        if let Some(oldest) = oldest.filter(|_| sessions.len() >= MAX_SESSIONS) {
+            sessions.remove(&oldest);
+        }
+    }
+    sessions.insert(key, (route, now));
+}
+
+/// `GET /pools/<pool>/models`: each route's status.
+fn models(pool: &Pool) -> Response {
+    let now = Instant::now();
+    let routes: Vec<Value> = pool
+        .routes
+        .iter()
+        .map(|r| {
+            let (status, left) = route_status(r, &r.endpoints, now);
+            json!({
+                "priority": r.priority,
+                "provider": r.provider.route.name,
+                "model": r.model,
+                "endpoints": r.endpoints,
+                "status": status,
+                "proof_valid_for_secs": left.map(|d| d.as_secs()),
+            })
+        })
+        .collect();
+    let body = json!({ "pool": pool.name, "routes": routes });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// [`status`] of `route` from its provider's last good fetch.
+fn route_status(
+    route: &PoolRoute,
+    endpoints: &[Endpoint],
+    now: Instant,
+) -> (&'static str, Option<Duration>) {
+    status(
+        lock(&route.provider.proof)
+            .as_ref()
+            .map(|p| (p.fetched, p.models.get(&route.model))),
+        endpoints,
+        now,
+    )
 }
 
 /// A route's status and how long its proof stays valid, from the provider's last good fetch
@@ -198,11 +478,7 @@ pub fn spawn_refresh(proxy: &Arc<Proxy>) {
                 match fetch(&live.client, provider).await {
                     Ok(models) => {
                         let fetched = Instant::now();
-                        *provider
-                            .proof
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner) =
-                            Some(Proof { fetched, models });
+                        *lock(&provider.proof) = Some(Proof { fetched, models });
                     }
                     Err(reason) => {
                         tracing::warn!(
@@ -213,8 +489,10 @@ pub fn spawn_refresh(proxy: &Arc<Proxy>) {
                     }
                 }
             }
+            let pause = REFRESH_EVERY + jitter();
+            *lock(&live.pools.next_refresh) = Instant::now() + pause;
             drop(live);
-            sleep(REFRESH_EVERY + jitter()).await;
+            sleep(pause).await;
         }
     });
 }
@@ -255,7 +533,10 @@ async fn fetch(
 
 #[cfg(test)]
 mod tests {
-    use super::{Duration, Endpoint, Instant, ModelProof, PROOF_VALID_FOR, jitter, status};
+    use super::{
+        Duration, Endpoint, Instant, MAX_SESSIONS, ModelProof, PROOF_VALID_FOR, SESSION_TTL,
+        Sessions, jitter, pinned, remember, status,
+    };
 
     const CHAT: &[Endpoint] = &[Endpoint::Chat];
 
@@ -310,6 +591,31 @@ mod tests {
             at(fetched, Some(&responses_only), later),
             ("closed: endpoint not in catalog", Some(1200))
         );
+    }
+
+    #[test]
+    fn sessions_expire_and_evict_the_oldest_when_full() {
+        let start = Instant::now();
+        let key = |n: usize| (0, n.to_string());
+        let mut sessions = Sessions::new();
+        remember(&mut sessions, key(0), 1, start);
+        assert_eq!(pinned(&sessions, &key(0), start + SESSION_TTL / 2), Some(1));
+        assert_eq!(pinned(&sessions, &key(0), start + SESSION_TTL), None);
+        assert_eq!(pinned(&sessions, &key(1), start), None);
+        let mut at = start;
+        for n in 1..=MAX_SESSIONS {
+            at += Duration::from_millis(1);
+            remember(&mut sessions, key(n), 0, at);
+        }
+        // Full: the oldest entry, 0, made room for the newest.
+        assert_eq!(sessions.len(), MAX_SESSIONS);
+        assert_eq!(pinned(&sessions, &key(0), at), None);
+        assert_eq!(pinned(&sessions, &key(1), at), Some(0));
+        // A known session updates in place; once all expire, they all make room.
+        remember(&mut sessions, key(1), 1, at);
+        assert_eq!(sessions.len(), MAX_SESSIONS);
+        remember(&mut sessions, key(0), 1, start + SESSION_TTL * 2);
+        assert_eq!(sessions.len(), 1);
     }
 
     #[test]
