@@ -83,6 +83,12 @@ before any upstream call (#29):
   model is replaced.
 - Caller routing fields: `provider`, `models`, `route`. The pool picks the route, never the body
   (#28).
+- Tools that run at the provider. Every `tools` entry must be an object whose `type` is
+  `function` (on `/responses`, `function` or `custom`): the caller runs those itself. Anything
+  else, such as OpenRouter server tools (`openrouter:web_search`, `openrouter:web_fetch`, ...) or
+  Responses built-in tools (`web_search_preview`, `file_search`, `code_interpreter`,
+  `image_generation`, `computer_use_preview`, `mcp`, ...), may be billed and is refused, as is a
+  `tool_choice` other than `auto`, `none`, `required` or an object of an allowed type.
 
 Otherwise the body's `model` is not rejected but replaced with the selected route's model. The
 caller names the pool, not a model.
