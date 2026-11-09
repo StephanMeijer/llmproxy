@@ -243,7 +243,7 @@ On `SIGTERM` or `SIGINT` the proxy stops accepting and lets in-flight and held r
 
 ## Not yet implemented
 
-Tracked as issues: a zero-cost model pool ([#1](https://github.com/StephanMeijer/llmproxy/issues/1)), a per-person ChatGPT subscription adapter using Responses ([#19](https://github.com/StephanMeijer/llmproxy/issues/19)), and Chat Completions compatibility for that adapter ([#20](https://github.com/StephanMeijer/llmproxy/issues/20)). Static limit state remains per-process; only Claude limits use shared PostgreSQL admission.
+Tracked as issues: a zero-cost model pool ([#1](https://github.com/StephanMeijer/llmproxy/issues/1), design in [`docs/pools.md`](docs/pools.md)), a per-person ChatGPT subscription adapter using Responses ([#19](https://github.com/StephanMeijer/llmproxy/issues/19)), and Chat Completions compatibility for that adapter ([#20](https://github.com/StephanMeijer/llmproxy/issues/20)). Static limit state remains per-process; only Claude limits use shared PostgreSQL admission.
 
 ## Development
 
