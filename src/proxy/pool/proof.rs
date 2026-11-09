@@ -1,6 +1,6 @@
 //! Reads a provider's `/models` catalog into proof of which models are free, per `docs/pools.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use serde_json::Value;
 
@@ -22,6 +22,10 @@ pub struct ProofError(pub &'static str);
 type Exempt = fn(&str, &str) -> bool;
 
 /// Proof per model id. Every rule fails closed: anything unexpected means not free.
+///
+/// A repeated id is free only when every listing is free, and serves only the kinds every listing
+/// names. A key repeated inside one object is not caught: `serde_json` keeps its last value, and
+/// detecting it needs a custom deserializer.
 pub fn parse(catalog: Catalog, body: &[u8]) -> Result<BTreeMap<String, ModelProof>, ProofError> {
     let body: Value =
         serde_json::from_slice(body).map_err(|_| ProofError("catalog is not JSON"))?;
@@ -41,32 +45,46 @@ pub fn parse(catalog: Catalog, body: &[u8]) -> Result<BTreeMap<String, ModelProo
             |parent, key| key == "when" || (parent == "multipliers" && key == "factor"),
         ),
     };
-    Ok(models
-        .iter()
-        .filter_map(|model| {
-            let id = model.get("id")?.as_str()?;
-            let free = required
-                .iter()
-                .all(|path| model.pointer(path).is_some_and(is_zero))
-                && model
-                    .get(root)
-                    .is_some_and(|prices| all_zero(prices, "", exempt));
-            let kinds = (catalog == Catalog::Opencode).then(|| {
-                model
-                    .get("api")
-                    .and_then(Value::as_object)
-                    .into_iter()
-                    .flat_map(|api| api.keys())
-                    .filter_map(|kind| match kind.as_str() {
-                        "chat-completions" => Some(Endpoint::Chat),
-                        "responses" => Some(Endpoint::Responses),
-                        _ => None,
-                    })
-                    .collect()
-            });
-            Some((id.to_owned(), ModelProof { free, kinds }))
-        })
-        .collect())
+    let mut proofs = BTreeMap::new();
+    let listings = models.iter().filter_map(|model| {
+        let id = model.get("id")?.as_str()?;
+        let free = required
+            .iter()
+            .all(|path| model.pointer(path).is_some_and(is_zero))
+            && model
+                .get(root)
+                .is_some_and(|prices| all_zero(prices, "", exempt));
+        let kinds = (catalog == Catalog::Opencode).then(|| {
+            model
+                .get("api")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|api| api.keys())
+                .filter_map(|kind| match kind.as_str() {
+                    "chat-completions" => Some(Endpoint::Chat),
+                    "responses" => Some(Endpoint::Responses),
+                    _ => None,
+                })
+                .collect()
+        });
+        Some((id.to_owned(), ModelProof { free, kinds }))
+    });
+    for (id, proof) in listings {
+        match proofs.entry(id) {
+            Entry::Vacant(entry) => {
+                entry.insert(proof);
+            }
+            Entry::Occupied(mut entry) => {
+                let seen = entry.get_mut();
+                seen.free &= proof.free;
+                // The catalog kind decides whether kinds is listed, so both sides are Some or None.
+                if let (Some(seen), Some(kinds)) = (&mut seen.kinds, proof.kinds) {
+                    seen.retain(|kind| kinds.contains(kind));
+                }
+            }
+        }
+    }
+    Ok(proofs)
 }
 
 /// Every value under `value` is exactly zero, except keys `exempt` names; array entries inherit
@@ -81,15 +99,16 @@ fn all_zero(value: &Value, parent: &str, exempt: Exempt) -> bool {
     }
 }
 
-/// A decimal string or number whose digits are all zero, such as `"0"`, `"0.000"` or `0`.
-/// Parsing as a float would wrongly accept `"-0"` or underflow `"1e-400"` to zero.
+/// A decimal string whose digits are all zero, such as `"0"` or `"0.000"`, or the integer `0`.
+/// Parsing as a float would wrongly accept `"-0"`; a float number such as `0.0` is refused because
+/// `serde_json` already underflows `1e-400` to it.
 fn is_zero(value: &Value) -> bool {
     let text = match value {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
+        Value::String(text) => text,
+        Value::Number(number) => return number.as_u64() == Some(0),
         _ => return false,
     };
-    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
     !whole.is_empty()
         && whole
             .bytes()
@@ -190,6 +209,36 @@ mod tests {
         assert!(!opencode(paid).free);
         assert!(!opencode(r#""cost":{"text":{"input":{"price":0}}}"#).free);
         assert!(!opencode(r#""api":{}"#).free);
+    }
+
+    #[test]
+    fn opencode_prices_must_be_the_integer_zero() {
+        let entry = |input: &str| {
+            format!(r#""cost":{{"text":{{"input":{{"price":{input}}},"output":{{"price":0}}}}}}"#)
+        };
+        assert!(opencode(&entry("0")).free);
+        // serde_json underflows 1e-400 to 0.0, so no float counts as zero.
+        for odd in ["1e-400", "0.0", "-0"] {
+            assert!(!opencode(&entry(odd)).free, "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_id_is_free_only_when_every_listing_is() {
+        let paid = r#"{"id":"a","pricing":{"prompt":"0.001","completion":"0"}}"#;
+        let free = r#"{"id":"a","pricing":{"prompt":"0","completion":"0"}}"#;
+        for data in [[paid, free], [free, paid]] {
+            let body = format!(r#"{{"data":[{}]}}"#, data.join(","));
+            assert!(!parse(Catalog::Openrouter, body.as_bytes()).unwrap()["a"].free);
+        }
+        let body = format!(r#"{{"data":[{free},{free}]}}"#);
+        assert!(parse(Catalog::Openrouter, body.as_bytes()).unwrap()["a"].free);
+        let body = br#"{"data":[{"id":"a","api":{"chat-completions":{},"responses":{}}},
+            {"id":"a","api":{"responses":{}}}]}"#;
+        assert_eq!(
+            parse(Catalog::Opencode, body).unwrap()["a"].kinds,
+            Some(vec![Endpoint::Responses])
+        );
     }
 
     #[test]

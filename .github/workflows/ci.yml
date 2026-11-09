@@ -19,9 +19,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Lint and audit need no Docker, so they run on the 9xx pool (no Docker daemon) on their own.
+  # Lint and audit need no Docker, so they run on their own.
   lint:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || '9xx' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,8 +38,7 @@ jobs:
       # Fails on any RustSec advisory, including unmaintained and yanked crates, in Cargo.lock.
       - run: cargo audit --deny warnings
 
-  # Stays GitHub-hosted (free for this public repo): the tests drive Docker (docker exec/kill/run) and
-  # the postgres service needs a job container under the 9xx runners' Kubernetes hook.
+  # The tests drive Docker (docker exec/kill/run) next to the postgres service.
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 45

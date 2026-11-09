@@ -101,7 +101,7 @@ A pool fails over across free models and closes any route whose price is not pro
 | | `endpoints` | At least one of `chat`, `responses`. |
 | | `quota` | A quota domain of the same provider. |
 
-Each provider's catalog is fetched at startup and every 10 minutes (plus up to 30 s of jitter), with the provider's headers, a 10 s timeout and an 8 MiB cap. Proof stays valid for 30 minutes after the fetch that produced it; a failed fetch keeps the old proof until then. `GET /pools/<pool>/models` (legacy `proxy_token`) shows each route's state:
+Each provider's catalog is fetched at startup and every 10 minutes (plus up to 30 s of jitter), with the provider's headers, a 10 s timeout and an 8 MiB cap. Proof stays valid for 30 minutes after the fetch that produced it; a failed fetch keeps the old proof until then. `GET /pools/<pool>/models` accepts any proxy token, like static routes (the legacy `proxy_token` or an enabled person token), and shows each route's state:
 
 ```json
 {"pool": "free", "routes": [{"priority": 1, "provider": "openrouter", "model": "…:free", "endpoints": ["chat"], "status": "eligible", "proof_valid_for_secs": 1712}]}
