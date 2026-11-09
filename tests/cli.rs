@@ -367,6 +367,42 @@ fn check_config_rejects_what_only_the_proxy_validates() {
 }
 
 #[test]
+fn check_config_honours_pgsslmode_unless_the_url_sets_sslmode() {
+    let check = |name: &str, url: &str| {
+        let path = write_config(
+            name,
+            &config(
+                0,
+                &format!("[postgres]\nurl = \"{url}\"\nnamespace = \"test\"\n"),
+            ),
+        );
+        let output = Command::new(BIN)
+            .args(["--check-config", path.to_str().unwrap()])
+            .env_remove(CONFIG_VAR)
+            .env(TOKEN_VAR, "t")
+            .env("PGSSLMODE", "verify-full")
+            .output()
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        output
+    };
+    // The environment supplies verify-full when the URL is silent.
+    let silent = check("pgsslmode-silent", "postgres://db.internal/x");
+    assert!(silent.status.success(), "{}", stderr(&silent));
+    // An explicit sslmode in the URL wins over the environment.
+    let explicit = check(
+        "pgsslmode-explicit",
+        "postgres://db.internal/x?sslmode=require",
+    );
+    assert_eq!(explicit.status.code(), Some(1));
+    assert!(
+        stderr(&explicit).contains("verify-full"),
+        "{}",
+        stderr(&explicit)
+    );
+}
+
+#[test]
 fn config_path_falls_back_to_the_environment_then_the_default() {
     let path = write_config("from-env", &config(0, ""));
     let from_env = Command::new(BIN)
