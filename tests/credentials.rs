@@ -14,6 +14,8 @@ mod evidence;
 mod lifecycle;
 #[path = "common/pg_dump.rs"]
 mod pg_dump;
+#[path = "credentials/providers.rs"]
+mod providers;
 #[path = "credentials/rotation.rs"]
 mod rotation;
 #[path = "credentials/rotation_failure.rs"]
@@ -23,13 +25,14 @@ use evidence::artifact;
 use llmproxy::{
     config::CredentialEncryptionConfig,
     secret::{KeyRing, SecretBytes},
-    storage::{self, Credentials, PersonId, Storage, StorageError},
+    storage::{self, Credentials, PersonId, Provider, Storage, StorageError},
 };
 use std::{collections::BTreeMap, fs};
 use uuid::Uuid;
 
 const ALICE: &[u8] = b"fake-anthropic-alice-credential-6";
 const BOB: &[u8] = b"fake-anthropic-bob-credential-6";
+const CHATGPT: &[u8] = b"fake-chatgpt-alice-credential-6";
 
 fn ring(active: &str, keys: &[(&str, u8)]) -> KeyRing {
     KeyRing::new(
@@ -42,7 +45,12 @@ fn ring(active: &str, keys: &[(&str, u8)]) -> KeyRing {
 }
 
 fn service(store: &Storage, keys: KeyRing) -> Credentials {
-    Credentials::new(store.clone(), keys, SecretBytes::new(vec![9; 32]))
+    Credentials::new(
+        store.clone(),
+        Provider::Anthropic,
+        keys,
+        SecretBytes::new(vec![9; 32]),
+    )
 }
 
 async fn setup() -> (database::Database, Storage, PersonId, PersonId) {

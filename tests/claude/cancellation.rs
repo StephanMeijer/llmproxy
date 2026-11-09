@@ -1,5 +1,6 @@
 use super::support::*;
 use axum::{body::Bytes, http::StatusCode};
+use llmproxy::storage::Provider;
 
 const LIMITS: &str = "[[limit]]\nname='first'\nprefixes=['/claude/']\nmax_inflight=1\n[[limit]]\nname='second'\nprefixes=['/claude/']\nmax_inflight=1\n";
 
@@ -13,6 +14,7 @@ async fn earlier_lease_loss_cancels_later_limit_wait_before_upstream() {
     seed.await.unwrap().unwrap().bytes().await.unwrap();
     f.state_count("concurrency_leases", 0).await;
     let key = llmproxy::storage::LimitKey {
+        provider: Provider::Anthropic,
         person: f.alice_version.person,
         name: "second".into(),
     };

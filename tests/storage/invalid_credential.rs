@@ -25,10 +25,15 @@ async fn unknown_persisted_credential_state_is_rejected_by_reads_and_health_coun
         [("test-key".into(), SecretBytes::new(vec![1; 32]))].into(),
     )
     .unwrap();
-    let credentials = Credentials::new(store.clone(), keys, SecretBytes::new(vec![2; 32]));
+    let credentials = Credentials::new(
+        store.clone(),
+        Provider::Anthropic,
+        keys,
+        SecretBytes::new(vec![2; 32]),
+    );
     // When the credential and health snapshot cross the database parsing boundary.
     let mut tx = store.begin().await.unwrap();
-    let record = tx.credential(person).await;
+    let record = tx.credential(Provider::Anthropic, person).await;
     tx.rollback().await.unwrap();
     let counts = credentials.counts().await;
     // Then neither path treats an unknown state as an active or absent credential.

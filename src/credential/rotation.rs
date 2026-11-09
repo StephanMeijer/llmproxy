@@ -19,8 +19,8 @@ impl Credentials {
         let mut counts = RotationCounts::default();
         loop {
             let mut tx = self.storage.begin().await?;
-            let person: Option<PersonId> = sqlx::query_scalar("SELECT person_id FROM provider_credentials WHERE namespace=$1 AND provider='anthropic' AND key_id<>$2 ORDER BY person_id LIMIT 1 FOR UPDATE")
-                .bind(&self.storage.namespace).bind(target).fetch_optional(&mut *tx.tx).await?;
+            let person: Option<PersonId> = sqlx::query_scalar("SELECT person_id FROM provider_credentials WHERE namespace=$1 AND provider=$3 AND key_id<>$2 ORDER BY person_id LIMIT 1 FOR UPDATE")
+                .bind(&self.storage.namespace).bind(target).bind(self.provider).fetch_optional(&mut *tx.tx).await?;
             let Some(person) = person else {
                 counts.remaining = sqlx::query_scalar(
                     "SELECT count(*) FROM provider_credentials WHERE namespace=$1 AND key_id<>$2",
@@ -33,7 +33,7 @@ impl Credentials {
                 return Ok(counts);
             };
             let record = tx
-                .credential(person)
+                .credential(self.provider, person)
                 .await?
                 .ok_or(StorageError::Unavailable)?;
             let source = record.envelope.ok_or(StorageError::Unavailable)?;
@@ -41,9 +41,9 @@ impl Credentials {
                 .keys
                 .reencrypt(&self.context(person), &source)
                 .map_err(|_| StorageError::Encryption)?;
-            sqlx::query("UPDATE provider_credentials SET format_version=$3,key_id=$4,nonce=$5,ciphertext=$6 WHERE namespace=$1 AND person_id=$2 AND provider='anthropic'")
+            sqlx::query("UPDATE provider_credentials SET format_version=$3,key_id=$4,nonce=$5,ciphertext=$6 WHERE namespace=$1 AND person_id=$2 AND provider=$7")
                 .bind(&self.storage.namespace).bind(person).bind(i32::from(envelope.version)).bind(&envelope.key_id)
-                .bind(envelope.nonce.as_slice()).bind(&envelope.ciphertext).execute(&mut *tx.tx).await?;
+                .bind(envelope.nonce.as_slice()).bind(&envelope.ciphertext).bind(self.provider).execute(&mut *tx.tx).await?;
             tx.commit().await?;
             counts.rewritten = counts.rewritten.saturating_add(1);
         }

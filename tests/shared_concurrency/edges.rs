@@ -44,6 +44,7 @@ async fn repository_rejects_invalid_capacity_and_definition_identity() {
         Err(StorageError::InvalidData)
     );
     let other_key = LimitKey {
+        provider: Provider::Anthropic,
         name: "different".into(),
         ..key
     };

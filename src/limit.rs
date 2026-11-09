@@ -174,7 +174,8 @@ impl Limit {
 pub struct Limits {
     pools: Vec<Limit>,
     by_model: bool,
-    exclude_claude: bool,
+    /// Paths an adapter limits through shared definitions instead.
+    shared_prefix: Option<&'static str>,
 }
 
 impl Limits {
@@ -185,7 +186,7 @@ impl Limits {
         Ok(Self {
             pools: configs.iter().map(Limit::new).collect::<Result<_, _>>()?,
             by_model: configs.iter().any(|c| c.model.is_some()),
-            exclude_claude: false,
+            shared_prefix: None,
         })
     }
 
@@ -203,7 +204,10 @@ impl Limits {
         model: Option<&str>,
         tokens: usize,
     ) -> Vec<OwnedSemaphorePermit> {
-        if self.exclude_claude && path.starts_with(shared::CLAUDE_PREFIX) {
+        if self
+            .shared_prefix
+            .is_some_and(|prefix| path.starts_with(prefix))
+        {
             return Vec::new();
         }
         #[allow(

@@ -20,7 +20,11 @@ async fn people_tokens_and_ciphertext_roundtrip_without_plaintext() {
     // When the current records are read through a fresh transaction.
     let mut tx = store.begin().await.unwrap();
     let token = tx.token(token_id).await.unwrap();
-    let stored = tx.credential(person).await.unwrap().unwrap();
+    let stored = tx
+        .credential(Provider::Anthropic, person)
+        .await
+        .unwrap()
+        .unwrap();
     // Then only the verifier and ciphertext are returned.
     assert_eq!(token.secret_hash, "$argon2id$test-verifier");
     assert!(token.person_enabled && !token.revoked);
@@ -78,13 +82,21 @@ async fn credential_replace_remove_and_stale_generation_are_atomic() {
         tx.replace_credential(&credential(person), &[4; 32]).await,
         Err(StorageError::Conflict)
     );
-    let mut record = tx.credential(person).await.unwrap().unwrap();
+    let mut record = tx
+        .credential(Provider::Anthropic, person)
+        .await
+        .unwrap()
+        .unwrap();
     record.state = CredentialState::Removed;
     assert_eq!(tx.set_credential_state(&record).await.unwrap(), 3);
     tx.commit().await.unwrap();
     // Then removal retains only the tombstone generation.
     let mut tx = store.begin().await.unwrap();
-    let stored = tx.credential(person).await.unwrap().unwrap();
+    let stored = tx
+        .credential(Provider::Anthropic, person)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.state, CredentialState::Removed);
     assert!(stored.envelope.is_none());
     assert_eq!(stored.generation, 3);
@@ -98,6 +110,7 @@ async fn limit_state_waiters_leases_and_release_roundtrip() {
     // Given a limit definition and two reservations.
     let (db, store, person) = setup().await;
     let key = LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     };
@@ -151,6 +164,7 @@ async fn expired_leases_cannot_revive_and_reclaim_uses_database_time() {
     // Given already expired reservations, without using the application clock.
     let (db, store, person) = setup().await;
     let key = LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     };
@@ -182,6 +196,85 @@ async fn expired_leases_cannot_revive_and_reclaim_uses_database_time() {
     .await
     .unwrap();
     assert_eq!(count, 0);
+    store.close().await;
+    db.close().await;
+}
+
+#[tokio::test]
+async fn providers_keep_separate_definitions_rates_waiters_and_leases() {
+    // Given an Anthropic and a ChatGPT limit with the same name but different configs.
+    let (db, store, person) = setup().await;
+    let anthropic = LimitKey {
+        provider: Provider::Anthropic,
+        person,
+        name: "budget".into(),
+    };
+    let chatgpt = LimitKey {
+        provider: Provider::ChatGpt,
+        ..anthropic.clone()
+    };
+    let config = Config::parse("listen='127.0.0.1:0'\nproxy_token='t'\n[[limit]]\nname='budget'\nprefixes=['/chatgpt/']\nrpm=11\n", |_| None).unwrap();
+    let chatgpt_definition =
+        CompiledLimits::new(&config.limits, "test", Provider::ChatGpt, "/chatgpt/")
+            .unwrap()
+            .shared
+            .remove(0);
+    let mut tx = store.begin().await.unwrap();
+    // When both are stored, the second is not a conflict with the first provider's row.
+    tx.put_limit(&anthropic, &definition()).await.unwrap();
+    tx.put_limit(&chatgpt, &chatgpt_definition).await.unwrap();
+    // And a key naming another provider than its definition is refused.
+    assert_eq!(
+        tx.put_limit(&anthropic, &chatgpt_definition).await,
+        Err(StorageError::InvalidData)
+    );
+    for (key, units) in [(&anthropic, 42), (&chatgpt, 7)] {
+        tx.put_rate(
+            key,
+            &RateState {
+                kind: RateKind::Requests,
+                available_units: units,
+                elapsed_microseconds: 0,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let waiter = Lease {
+        id: ReservationId(Uuid::new_v4()),
+        owner: OwnerId(Uuid::new_v4()),
+    };
+    tx.enqueue(&anthropic, &waiter, LONG).await.unwrap();
+    let held = FencedLease::new(OwnerId(Uuid::new_v4()));
+    assert!(tx.acquire_concurrency(&anthropic, &held, 1).await.unwrap());
+    tx.commit().await.unwrap();
+    // Then each provider sees only its own balance, queue and leases.
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.lock_rates(&anthropic)
+            .await
+            .unwrap()
+            .first()
+            .unwrap()
+            .available_units,
+        42
+    );
+    assert_eq!(
+        tx.lock_rates(&chatgpt)
+            .await
+            .unwrap()
+            .first()
+            .unwrap()
+            .available_units,
+        7
+    );
+    assert!(tx.waiter_head(&anthropic).await.unwrap().is_some());
+    assert!(tx.waiter_head(&chatgpt).await.unwrap().is_none());
+    assert!(!tx.renew_concurrency(&chatgpt, &held).await.unwrap());
+    let other = FencedLease::new(OwnerId(Uuid::new_v4()));
+    assert!(tx.acquire_concurrency(&chatgpt, &other, 1).await.unwrap());
+    assert!(!tx.acquire_concurrency(&anthropic, &other, 1).await.unwrap());
+    tx.rollback().await.unwrap();
     store.close().await;
     db.close().await;
 }

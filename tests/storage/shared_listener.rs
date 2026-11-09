@@ -194,6 +194,7 @@ async fn limit_commits_wake_only_waiters_on_the_same_limit() {
     let (db, store, alice) = setup().await;
     let bob = PersonId(Uuid::new_v4());
     let key = |person| LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     };

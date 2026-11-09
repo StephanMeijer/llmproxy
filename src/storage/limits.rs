@@ -1,4 +1,4 @@
-use super::{PersonId, StorageError, StorageTransaction};
+use super::{PersonId, Provider, StorageError, StorageTransaction};
 use crate::limit::shared::SharedDefinition;
 
 #[path = "rate.rs"]
@@ -8,6 +8,7 @@ pub use rate::PreparedRates;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LimitKey {
     pub person: PersonId,
+    pub provider: Provider,
     pub name: String,
 }
 
@@ -34,7 +35,10 @@ impl StorageTransaction {
         key: &LimitKey,
         definition: &SharedDefinition,
     ) -> Result<i64, StorageError> {
-        if definition.namespace() != self.namespace || definition.name() != key.name {
+        if definition.namespace() != self.namespace
+            || definition.provider() != key.provider
+            || definition.name() != key.name
+        {
             return Err(StorageError::InvalidData);
         }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || '/' || $2, 0))")
@@ -42,15 +46,15 @@ impl StorageTransaction {
             .bind(&key.name)
             .execute(&mut *self.tx)
             .await?;
-        let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM limit_definitions WHERE namespace=$1 AND provider='anthropic' AND name=$2 AND config<>$3)")
-            .bind(&self.namespace).bind(&key.name).bind(sqlx::types::Json(definition)).fetch_one(&mut *self.tx).await?;
+        let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM limit_definitions WHERE namespace=$1 AND provider=$4 AND name=$2 AND config<>$3)")
+            .bind(&self.namespace).bind(&key.name).bind(sqlx::types::Json(definition)).bind(key.provider).fetch_one(&mut *self.tx).await?;
         if conflict {
             return Err(StorageError::Conflict);
         }
         // The conflict check above proves an existing row already holds this config, so it is never
         // rewritten. The advisory lock makes a concurrent insert visible to the fallback SELECT.
-        Ok(sqlx::query_scalar("WITH inserted AS (INSERT INTO limit_definitions(namespace,person_id,provider,name,config) VALUES ($1,$2,'anthropic',$3,$4) ON CONFLICT(namespace,person_id,provider,name) DO NOTHING RETURNING version) SELECT version FROM inserted UNION ALL SELECT version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND name=$3 LIMIT 1")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(sqlx::types::Json(definition))
+        Ok(sqlx::query_scalar("WITH inserted AS (INSERT INTO limit_definitions(namespace,person_id,provider,name,config) VALUES ($1,$2,$5,$3,$4) ON CONFLICT(namespace,person_id,provider,name) DO NOTHING RETURNING version) SELECT version FROM inserted UNION ALL SELECT version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider=$5 AND name=$3 LIMIT 1")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(sqlx::types::Json(definition)).bind(key.provider)
             .fetch_one(&mut *self.tx).await?)
     }
 
@@ -59,8 +63,8 @@ impl StorageTransaction {
     /// Returns `NotFound` or a sanitized database error.
     pub async fn lock_rates(&mut self, key: &LimitKey) -> Result<Vec<RateState>, StorageError> {
         self.lock_definition(key).await?;
-        Ok(sqlx::query_as("SELECT kind,available_units,GREATEST(0,(extract(epoch FROM (clock_timestamp()-updated_at))*1000000)::bigint) AS elapsed_microseconds FROM rate_state WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 ORDER BY kind FOR UPDATE")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_all(&mut *self.tx).await?)
+        Ok(sqlx::query_as("SELECT kind,available_units,GREATEST(0,(extract(epoch FROM (clock_timestamp()-updated_at))*1000000)::bigint) AS elapsed_microseconds FROM rate_state WHERE namespace=$1 AND person_id=$2 AND provider=$4 AND limit_name=$3 ORDER BY kind FOR UPDATE")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(key.provider).fetch_all(&mut *self.tx).await?)
     }
 
     /// Writes fixed-point state using database time, under the definition lock.
@@ -72,8 +76,8 @@ impl StorageTransaction {
         state: &RateState,
     ) -> Result<(), StorageError> {
         self.lock_definition(key).await?;
-        sqlx::query("INSERT INTO rate_state(namespace,person_id,provider,limit_name,kind,available_units) VALUES ($1,$2,'anthropic',$3,$4,$5) ON CONFLICT(namespace,person_id,provider,limit_name,kind) DO UPDATE SET available_units=EXCLUDED.available_units,updated_at=clock_timestamp()")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(state.kind).bind(state.available_units)
+        sqlx::query("INSERT INTO rate_state(namespace,person_id,provider,limit_name,kind,available_units) VALUES ($1,$2,$6,$3,$4,$5) ON CONFLICT(namespace,person_id,provider,limit_name,kind) DO UPDATE SET available_units=EXCLUDED.available_units,updated_at=clock_timestamp()")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(state.kind).bind(state.available_units).bind(key.provider)
             .execute(&mut *self.tx).await?;
         Ok(())
     }
@@ -82,8 +86,8 @@ impl StorageTransaction {
         if self.locked.as_ref() == Some(key) {
             return Ok(());
         }
-        sqlx::query("SELECT version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND name=$3 FOR UPDATE")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_one(&mut *self.tx).await?;
+        sqlx::query("SELECT version FROM limit_definitions WHERE namespace=$1 AND person_id=$2 AND provider=$4 AND name=$3 FOR UPDATE")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(key.provider).fetch_one(&mut *self.tx).await?;
         self.mark_locked(key);
         Ok(())
     }

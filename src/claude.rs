@@ -20,11 +20,13 @@ use crate::{
             SharedAdmissionError, SharedDefinition, SharedRateStore, SharedRequest,
         },
     },
-    metrics::{CredentialOperation, CredentialOutcome, CredentialProvider, StorageMetrics},
-    storage::{CredentialVersion, Credentials, Storage, StorageError},
+    metrics::{CredentialOperation, CredentialOutcome, StorageMetrics},
+    storage::{CredentialVersion, Credentials, Provider, Storage, StorageError},
 };
 
 pub const MESSAGES_PATH: &str = "/claude/v1/messages";
+/// Paths under this prefix use shared limits instead of process-local ones.
+const PREFIX: &str = "/claude/";
 const COUNTS_RETRY: Duration = Duration::from_millis(250);
 
 /// The adapter cannot serve this request: no usable credential, database or key ring.
@@ -72,7 +74,12 @@ impl Claude {
             .as_ref()
             .zip(storage)
             .ok_or_else(|| ConfigError("Claude requires PostgreSQL".into()))?;
-        let compiled = CompiledLimits::new(&config.limits, &postgres.namespace)?;
+        let compiled = CompiledLimits::new(
+            &config.limits,
+            &postgres.namespace,
+            Provider::Anthropic,
+            PREFIX,
+        )?;
         let encryption = config
             .credential_encryption
             .as_ref()
@@ -125,7 +132,8 @@ impl Claude {
         if let Some(runtime) = self.runtime.get() {
             return Some(runtime);
         }
-        let credentials = Credentials::open(self.storage.clone(), &self.encryption).ok()?;
+        let credentials =
+            Credentials::open(self.storage.clone(), Provider::Anthropic, &self.encryption).ok()?;
         let store = SharedRateStore::new(self.storage.clone(), max_wait);
         Some(self.runtime.get_or_init(|| {
             let credentials = Arc::new(credentials);
@@ -222,7 +230,7 @@ fn spawn_counts(
             let scan = credentials.counts().await;
             let failed = scan.is_err();
             if let Ok(counts) = scan {
-                metrics.set_credentials(CredentialProvider::Anthropic, counts);
+                metrics.set_credentials(Provider::Anthropic, counts);
             }
             tokio::select! {
                 result = changes.changed() => if result.is_err() { break },
@@ -249,7 +257,7 @@ async fn invalidate(
         }
     };
     metrics.record_operation(
-        CredentialProvider::Anthropic,
+        Provider::Anthropic,
         CredentialOperation::Invalidate,
         outcome,
     );

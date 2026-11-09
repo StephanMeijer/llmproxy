@@ -5,6 +5,7 @@ async fn invalid_fingerprint_key_prevents_installation() {
     let (db, store, alice, _) = setup().await;
     let credentials = Credentials::new(
         store.clone(),
+        Provider::Anthropic,
         ring("old", &[("old", 1)]),
         SecretBytes::new(Vec::new()),
     );
@@ -15,7 +16,12 @@ async fn invalid_fingerprint_key_prevents_installation() {
         Err(StorageError::Encryption)
     );
     let mut tx = store.begin().await.unwrap();
-    assert!(tx.credential(alice).await.unwrap().is_none());
+    assert!(
+        tx.credential(Provider::Anthropic, alice)
+            .await
+            .unwrap()
+            .is_none()
+    );
     tx.rollback().await.unwrap();
     store.close().await;
     db.close().await;
@@ -26,6 +32,7 @@ async fn active_state_requires_the_encrypted_installation_path() {
     let (db, store, alice, _) = setup().await;
     let mut tx = store.begin().await.unwrap();
     let record = storage::CredentialRecord {
+        provider: Provider::Anthropic,
         person: alice,
         generation: 1,
         state: storage::CredentialState::Active,

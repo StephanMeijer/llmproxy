@@ -1,4 +1,4 @@
-use super::{PersonId, StorageError, StorageTransaction};
+use super::{PersonId, Provider, StorageError, StorageTransaction};
 use crate::secret::CredentialEnvelope;
 use sqlx::{Row, postgres::PgRow};
 
@@ -20,6 +20,7 @@ pub enum CredentialState {
 #[derive(Debug)]
 pub struct CredentialRecord {
     pub person: PersonId,
+    pub provider: Provider,
     pub generation: i64,
     pub state: CredentialState,
     pub envelope: Option<CredentialEnvelope>,
@@ -31,10 +32,11 @@ impl StorageTransaction {
     /// Returns a sanitized missing, malformed, or unavailable record error.
     pub async fn credential(
         &mut self,
+        provider: Provider,
         person: PersonId,
     ) -> Result<Option<CredentialRecord>, StorageError> {
-        let row = sqlx::query("SELECT generation,state,format_version,key_id,nonce,ciphertext FROM provider_credentials WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' FOR UPDATE")
-            .bind(&self.namespace).bind(person).fetch_optional(&mut *self.tx).await?;
+        let row = sqlx::query("SELECT generation,state,format_version,key_id,nonce,ciphertext FROM provider_credentials WHERE namespace=$1 AND person_id=$2 AND provider=$3 FOR UPDATE")
+            .bind(&self.namespace).bind(person).bind(provider).fetch_optional(&mut *self.tx).await?;
         row.map(|row| {
             let state = row.try_get("state")?;
             let envelope = match state {
@@ -43,6 +45,7 @@ impl StorageTransaction {
             };
             Ok(CredentialRecord {
                 person,
+                provider,
                 generation: row.try_get("generation")?,
                 state,
                 envelope,
@@ -60,9 +63,9 @@ impl StorageTransaction {
         fingerprint: &[u8; 32],
     ) -> Result<(), StorageError> {
         let envelope = record.envelope.as_ref().ok_or(StorageError::InvalidData)?;
-        sqlx::query("INSERT INTO provider_credentials(namespace,person_id,provider,state,format_version,key_id,nonce,ciphertext,fingerprint) VALUES ($1,$2,'anthropic','active',$3,$4,$5,$6,$7)")
+        sqlx::query("INSERT INTO provider_credentials(namespace,person_id,provider,state,format_version,key_id,nonce,ciphertext,fingerprint) VALUES ($1,$2,$8,'active',$3,$4,$5,$6,$7)")
             .bind(&self.namespace).bind(record.person).bind(i32::from(envelope.version)).bind(&envelope.key_id)
-            .bind(envelope.nonce.as_slice()).bind(&envelope.ciphertext).bind(fingerprint.as_slice())
+            .bind(envelope.nonce.as_slice()).bind(&envelope.ciphertext).bind(fingerprint.as_slice()).bind(record.provider)
             .execute(&mut *self.tx).await?;
         Ok(())
     }
@@ -76,9 +79,9 @@ impl StorageTransaction {
         fingerprint: &[u8; 32],
     ) -> Result<i64, StorageError> {
         let envelope = record.envelope.as_ref().ok_or(StorageError::InvalidData)?;
-        sqlx::query_scalar("UPDATE provider_credentials SET state='active',format_version=$4,key_id=$5,nonce=$6,ciphertext=$7,fingerprint=$8 WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND generation=$3 RETURNING generation")
+        sqlx::query_scalar("UPDATE provider_credentials SET state='active',format_version=$4,key_id=$5,nonce=$6,ciphertext=$7,fingerprint=$8 WHERE namespace=$1 AND person_id=$2 AND provider=$9 AND generation=$3 RETURNING generation")
             .bind(&self.namespace).bind(record.person).bind(record.generation).bind(i32::from(envelope.version)).bind(&envelope.key_id)
-            .bind(envelope.nonce.as_slice()).bind(&envelope.ciphertext).bind(fingerprint.as_slice())
+            .bind(envelope.nonce.as_slice()).bind(&envelope.ciphertext).bind(fingerprint.as_slice()).bind(record.provider)
             .fetch_optional(&mut *self.tx).await?.ok_or(StorageError::Conflict)
     }
 
@@ -92,16 +95,17 @@ impl StorageTransaction {
         let query = match record.state {
             CredentialState::Active => return Err(StorageError::InvalidData),
             CredentialState::Invalid => {
-                "UPDATE provider_credentials SET state='invalid' WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND generation=$3 AND state <> 'removed' RETURNING generation"
+                "UPDATE provider_credentials SET state='invalid' WHERE namespace=$1 AND person_id=$2 AND provider=$4 AND generation=$3 AND state <> 'removed' RETURNING generation"
             }
             CredentialState::Removed => {
-                "UPDATE provider_credentials SET state='removed',format_version=NULL,key_id=NULL,nonce=NULL,ciphertext=NULL,fingerprint=NULL WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND generation=$3 RETURNING generation"
+                "UPDATE provider_credentials SET state='removed',format_version=NULL,key_id=NULL,nonce=NULL,ciphertext=NULL,fingerprint=NULL WHERE namespace=$1 AND person_id=$2 AND provider=$4 AND generation=$3 RETURNING generation"
             }
         };
         sqlx::query_scalar(query)
             .bind(&self.namespace)
             .bind(record.person)
             .bind(record.generation)
+            .bind(record.provider)
             .fetch_optional(&mut *self.tx)
             .await?
             .ok_or(StorageError::Conflict)

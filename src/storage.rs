@@ -28,6 +28,28 @@ pub use people::{Person, PersonId, TokenId, TokenRecord};
 pub use queue::{Lease, OwnerId, ReservationId, Waiter};
 pub use runtime::{Storage, StorageTransaction};
 
+/// Upstream providers whose credentials and shared limits are stored, keyed by `as_str()`.
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, sqlx::Type, serde::Serialize,
+)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Anthropic,
+    ChatGpt,
+}
+
+impl Provider {
+    /// Database value, encryption context and metric label; never change an existing value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::ChatGpt => "chatgpt",
+        }
+    }
+}
+
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 const MIGRATION_LOCK: i64 = 0x006c_6c6d_7072_6f78;
 const MIN_POSTGRES_VERSION: i32 = 160_000;

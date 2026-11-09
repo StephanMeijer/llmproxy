@@ -27,8 +27,8 @@ impl StorageTransaction {
     /// Returns a sanitized database error.
     pub async fn waiter_head(&mut self, key: &LimitKey) -> Result<Option<Waiter>, StorageError> {
         self.lock_definition(key).await?;
-        Ok(sqlx::query_as("SELECT id,owner,enqueue_order FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at>clock_timestamp() ORDER BY enqueue_order LIMIT 1 FOR UPDATE")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).fetch_optional(&mut *self.tx).await?)
+        Ok(sqlx::query_as("SELECT id,owner,enqueue_order FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider=$4 AND limit_name=$3 AND expires_at>clock_timestamp() ORDER BY enqueue_order LIMIT 1 FOR UPDATE")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(key.provider).fetch_optional(&mut *self.tx).await?)
     }
 
     /// Checks the caller's database-time deadline under the definition lock.
@@ -40,8 +40,8 @@ impl StorageTransaction {
         lease: &Lease,
     ) -> Result<bool, StorageError> {
         self.lock_definition(key).await?;
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND id=$4 AND owner=$5 AND expires_at>clock_timestamp())")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).fetch_one(&mut *self.tx).await?)
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider=$6 AND limit_name=$3 AND id=$4 AND owner=$5 AND expires_at>clock_timestamp())")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).bind(key.provider).fetch_one(&mut *self.tx).await?)
     }
 
     /// Deletes an owned waiter; commit publishes the queue advancement notification.
@@ -53,8 +53,8 @@ impl StorageTransaction {
         lease: &Lease,
     ) -> Result<(), StorageError> {
         self.lock_definition(key).await?;
-        sqlx::query("DELETE FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND id=$4 AND owner=$5")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).execute(&mut *self.tx).await?;
+        sqlx::query("DELETE FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider=$6 AND limit_name=$3 AND id=$4 AND owner=$5")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).bind(key.provider).execute(&mut *self.tx).await?;
         Ok(())
     }
     /// Adds a waiter in database-serialized FIFO order; TTL uses server time.
@@ -67,8 +67,8 @@ impl StorageTransaction {
         ttl: Duration,
     ) -> Result<i64, StorageError> {
         self.lock_definition(key).await?;
-        Ok(sqlx::query_scalar("INSERT INTO fifo_waiters(namespace,person_id,provider,limit_name,id,owner,expires_at) VALUES ($1,$2,'anthropic',$3,$4,$5,clock_timestamp()+$6::bigint*interval '1 microsecond') RETURNING enqueue_order")
-            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).bind(microseconds(ttl)?)
+        Ok(sqlx::query_scalar("INSERT INTO fifo_waiters(namespace,person_id,provider,limit_name,id,owner,expires_at) VALUES ($1,$2,$7,$3,$4,$5,clock_timestamp()+$6::bigint*interval '1 microsecond') RETURNING enqueue_order")
+            .bind(&self.namespace).bind(key.person).bind(&key.name).bind(lease.id).bind(lease.owner).bind(microseconds(ttl)?).bind(key.provider)
             .fetch_one(&mut *self.tx).await?)
     }
 
@@ -79,13 +79,14 @@ impl StorageTransaction {
         self.lock_definition(key).await?;
         let mut changed = false;
         for query in [
-            "DELETE FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at<=clock_timestamp()",
-            "DELETE FROM concurrency_leases WHERE namespace=$1 AND person_id=$2 AND provider='anthropic' AND limit_name=$3 AND expires_at<=clock_timestamp()",
+            "DELETE FROM fifo_waiters WHERE namespace=$1 AND person_id=$2 AND provider=$4 AND limit_name=$3 AND expires_at<=clock_timestamp()",
+            "DELETE FROM concurrency_leases WHERE namespace=$1 AND person_id=$2 AND provider=$4 AND limit_name=$3 AND expires_at<=clock_timestamp()",
         ] {
             changed |= sqlx::query(query)
                 .bind(&self.namespace)
                 .bind(key.person)
                 .bind(&key.name)
+                .bind(key.provider)
                 .execute(&mut *self.tx)
                 .await?
                 .rows_affected()

@@ -2,7 +2,7 @@ use super::database;
 use llmproxy::{
     config::Config,
     limit::shared::{CompiledLimits, SharedCharge, SharedDefinition, SharedRateStore},
-    storage::{self, Lease, LimitKey, OwnerId, PersonId, ReservationId, Storage},
+    storage::{self, Lease, LimitKey, OwnerId, PersonId, Provider, ReservationId, Storage},
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -77,7 +77,9 @@ pub fn definitions(body: &str) -> Vec<SharedDefinition> {
         |_| None,
     )
     .unwrap();
-    CompiledLimits::new(&config.limits, "test").unwrap().shared
+    CompiledLimits::new(&config.limits, "test", Provider::Anthropic, "/claude/")
+        .unwrap()
+        .shared
 }
 pub fn definition(body: &str) -> SharedDefinition {
     definitions(&format!(
@@ -98,6 +100,7 @@ pub const fn charge(
 }
 pub fn key(person: PersonId) -> LimitKey {
     LimitKey {
+        provider: Provider::Anthropic,
         person,
         name: "budget".into(),
     }
