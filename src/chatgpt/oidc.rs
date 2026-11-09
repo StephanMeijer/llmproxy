@@ -227,13 +227,14 @@ enum Audience {
 struct Claims {
     iss: String,
     aud: Audience,
+    azp: Option<String>,
     exp: u64,
     nonce: Option<String>,
     sub: String,
     email: Option<String>,
 }
 
-/// Verifies an RS256 ID token's signature against `keys`, then its `iss`, `aud`, `exp` (with up
+/// Verifies an RS256 ID token's signature against `keys`, then its `iss`, `aud` and `azp`, `exp` (with up
 /// to 60 s leeway against `now`, Unix seconds), `nonce` and a non-empty `sub`.
 ///
 /// # Errors
@@ -276,10 +277,19 @@ pub fn verify_id_token(
     if claims.iss != expected_issuer {
         return Err(OidcError::Issuer);
     }
-    if !match &claims.aud {
-        Audience::One(aud) => aud == expected_audience,
-        Audience::Many(auds) => auds.iter().any(|aud| aud == expected_audience),
-    } {
+    let (listed, azp_required) = match &claims.aud {
+        Audience::One(aud) => (aud == expected_audience, false),
+        Audience::Many(auds) => (
+            auds.iter().any(|aud| aud == expected_audience),
+            auds.len() > 1,
+        ),
+    };
+    // OIDC Core 3.1.3.7: several audiences need `azp`, and a present `azp` must be our client.
+    let azp_ok = claims
+        .azp
+        .as_deref()
+        .map_or(!azp_required, |azp| azp == expected_audience);
+    if !listed || !azp_ok {
         return Err(OidcError::Audience);
     }
     if claims.exp.saturating_add(EXPIRY_LEEWAY_SECONDS) <= now {

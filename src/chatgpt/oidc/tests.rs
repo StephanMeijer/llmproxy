@@ -49,11 +49,15 @@ fn keys() -> Keys {
 }
 
 fn jwks() -> Value {
-    let key = &keys()[KID];
     json!({"keys": [
         {"kty": "EC", "kid": "ec", "crv": "P-256", "x": "a", "y": "b"},
-        {"kty": "RSA", "kid": KID, "n": encode(&key.n), "e": encode(&key.e), "alg": "RS256", "use": "sig"},
+        rsa_jwk(KID),
     ]})
+}
+
+fn rsa_jwk(kid: &str) -> Value {
+    let key = &keys()[KID];
+    json!({"kty": "RSA", "kid": kid, "n": encode(&key.n), "e": encode(&key.e), "alg": "RS256", "use": "sig"})
 }
 
 /// Signs `header.payload` (both already base64url) with the test key.
@@ -105,8 +109,11 @@ fn a_valid_token_yields_its_identity() {
     assert_eq!(claims.sub, "user-1");
     assert_eq!(claims.email.as_deref(), Some("a@example.com"));
     assert_eq!(claims.exp, NOW + 600);
-    let array = with("aud", json!(["other", AUDIENCE]));
+    let mut array = with("aud", json!(["other", AUDIENCE]));
+    array["azp"] = json!(AUDIENCE);
     assert_eq!(verify(&sign(&header(), &array)).unwrap().sub, "user-1");
+    let single = with("aud", json!([AUDIENCE]));
+    assert!(verify(&sign(&header(), &single)).is_ok());
     let within_leeway = with("exp", json!(NOW - 30));
     assert!(verify(&sign(&header(), &within_leeway)).is_ok());
 }
@@ -120,6 +127,8 @@ fn claim_mismatches_are_refused() {
         ),
         (with("aud", json!("other")), OidcError::Audience),
         (with("aud", json!(["other"])), OidcError::Audience),
+        (with("aud", json!(["other", AUDIENCE])), OidcError::Audience),
+        (with("azp", json!("other")), OidcError::Audience),
         (with("exp", json!(NOW - 61)), OidcError::Expired),
         (with("nonce", json!("other")), OidcError::Nonce),
         (with("nonce", Value::Null), OidcError::Nonce),
@@ -207,7 +216,8 @@ fn errors_are_fixed_strings() {
     }
 }
 
-/// A fake issuer: discovery naming `issuer`, a JWKS whose hits are counted, and an oversized body.
+/// A fake issuer: discovery naming `issuer`, a JWKS whose hits are counted (it adds the `rotated`
+/// kid from its second hit on), and an oversized body.
 async fn fake(issuer: Option<&str>) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -228,8 +238,14 @@ async fn fake(issuer: Option<&str>) -> (String, Arc<AtomicUsize>) {
         .route(
             "/jwks",
             get(|State(hits): State<Arc<AtomicUsize>>| async move {
-                hits.fetch_add(1, Ordering::SeqCst);
-                jwks().to_string()
+                let mut jwks = jwks();
+                if hits.fetch_add(1, Ordering::SeqCst) > 0 {
+                    jwks["keys"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(rsa_jwk("rotated"));
+                }
+                jwks.to_string()
             }),
         )
         .route("/big", get(|| async { "x".repeat(MAX_DOCUMENT_BYTES + 1) }))
@@ -303,12 +319,16 @@ async fn an_unknown_key_refetches_at_most_once_a_minute() {
         .keys_fetched_at
         .checked_sub(Duration::from_secs(61))
         .unwrap();
-    let unknown = cache.verify(&client, &rotated, AUDIENCE, NONCE, NOW).await;
-    assert_eq!(unknown.unwrap_err(), OidcError::UnknownKey);
+    let refetched = cache.verify(&client, &rotated, AUDIENCE, NONCE, NOW).await;
+    assert_eq!(refetched.unwrap().sub, "user-1", "the rotated key is used");
     assert_eq!(
         hits.load(Ordering::SeqCst),
         2,
         "one refetch after the interval"
     );
+    let unknown = sign(&json!({"alg": "RS256", "kid": "gone"}), &claims);
+    let unknown = cache.verify(&client, &unknown, AUDIENCE, NONCE, NOW).await;
+    assert_eq!(unknown.unwrap_err(), OidcError::UnknownKey);
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "refetch stays rate-limited");
     assert_eq!(cache.discovery().issuer, base);
 }
