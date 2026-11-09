@@ -109,14 +109,14 @@ Each provider's catalog is fetched at startup and every 10 minutes (plus up to 3
 
 `status` is `eligible` or one of `closed: no proof` (no successful fetch yet), `closed: expired`, `closed: not free`, `closed: missing from catalog`, `closed: endpoint not in catalog` (opencode lists API kinds, and none of the route's `endpoints`). `proof_valid_for_secs` is `null` without valid proof. An unknown pool gets `404`.
 
-`POST /pools/<pool>/chat/completions` and `POST /pools/<pool>/responses` (legacy `proxy_token`) are served; every other `/pools/` path gets `404`. The body must be a JSON object of at most `max_body` bytes (`413`). Before any upstream call, a body with `plugins`, `web_search_options`, `provider`, `models` or `route`, or a `model` ending in `:online`, gets `400` `bad_request`. Otherwise the body's `model` is replaced with the chosen route's model.
+`POST /pools/<pool>/chat/completions` and `POST /pools/<pool>/responses` (legacy `proxy_token`) are served; every other `/pools/` path gets `404`. The body must be a JSON object of at most `max_body` bytes (`413`). Before any upstream call, a body with `plugins`, `web_search_options`, `provider`, `models` or `route`, a `model` ending in `:online`, a `tools` entry whose `type` is not `function` (on `/responses`: `function` or `custom`), such as `openrouter:web_search` or `web_search_preview`, or a `tool_choice` other than `auto`, `none`, `required` or one of those types, gets `400` `bad_request`. Otherwise the body's `model` is replaced with the chosen route's model.
 
 Routes are tried in ascending priority. A route is a candidate when it declares the endpoint, its status is `eligible` for that endpoint, it is not cooling down, and its quota domain has a request left this minute (it is taken then). Each attempt is sent once, with the provider's headers instead of the client's credentials:
 
 | Upstream outcome | What happens |
 |---|---|
 | Connect error or timeout before headers, or `5xx` | Try the next route. |
-| `429` | Cool the quota domain down for `Retry-After` (whole seconds), default 60 s, then try the next route. |
+| `429` | Cool the quota domain down for `Retry-After` (whole seconds), default 60 s, at most 1 h, then try the next route. |
 | `401` or `403` | Cool the route down for 5 min, then try the next route. |
 | Any other status | Relay it unchanged, streaming included, with `x-llmproxy-pool-route: <provider>/<model>` and `x-llmproxy-pool-priority: <priority>`. |
 
