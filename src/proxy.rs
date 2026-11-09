@@ -228,7 +228,7 @@ fn render_durations(name: &str, help: &str, durations: &Durations) -> String {
     format!("# HELP {name} {help}\n# TYPE {name} histogram\n{rows}")
 }
 
-/// Request counters, two gauges and two duration histograms, rendered as Prometheus text.
+/// Request counters, two gauges, two duration histograms and the pool counters, rendered as Prometheus text.
 #[derive(Default)]
 pub struct Metrics {
     storage: Arc<StorageMetrics>,
@@ -241,6 +241,7 @@ pub struct Metrics {
     to_headers: Durations,
     /// Seconds from arrival until the response body ends, by route.
     to_end: Durations,
+    pool: Arc<pool::Counters>,
 }
 
 impl Metrics {
@@ -290,10 +291,11 @@ impl Metrics {
              # TYPE llm3_http_requests_in_flight gauge\nllm3_http_requests_in_flight {}\n\
              # HELP llm3_http_requests_held Requests currently waiting on a limit.\n\
              # TYPE llm3_http_requests_held gauge\nllm3_http_requests_held {}\n\
-             {headers}{end}{}",
+             {headers}{end}{}{}",
             self.in_flight.load(Ordering::Relaxed),
             self.held.load(Ordering::Relaxed),
-            self.storage.render()
+            self.storage.render(),
+            self.pool.render()
         )
     }
 }
@@ -385,10 +387,12 @@ impl Proxy {
             .map(Storage::new)
             .transpose()
             .map_err(|e| ConfigError(format!("postgres: {e}")))?;
+        let pools = pool::Pools::new(&config)?;
         let metrics = Metrics {
             storage: storage
                 .as_ref()
                 .map_or_else(Arc::default, |storage| Arc::clone(storage.metrics())),
+            pool: Arc::clone(pools.counters()),
             ..Metrics::default()
         };
         let (adapter, limits) = Claude::configure(&config, storage.clone())?;
@@ -404,7 +408,6 @@ impl Proxy {
             )),
             _ => None,
         };
-        let pools = pool::Pools::new(&config)?;
         let auth = Authenticator::new(config.proxy_token, storage, config.max_wait);
         Ok(Self {
             auth,

@@ -219,6 +219,11 @@ fn example_config_parses() {
     let config = Config::parse(text, |_| Some("x".to_owned())).unwrap();
     assert_eq!(config.routes.len(), 5);
     assert_eq!(config.limits.len(), 3);
+    assert_eq!(config.pool_providers.len(), 1);
+    assert_eq!(config.quota_domains.len(), 1);
+    assert_eq!(config.pools.len(), 1);
+    assert_eq!(config.pools.first().unwrap().routes.len(), 1);
+    // Only `router` starts the catalog refresh, so this stays offline.
     Proxy::new(config).unwrap();
 }
 

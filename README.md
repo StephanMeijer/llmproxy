@@ -124,6 +124,17 @@ A response is relayed before its body is read, so a stream that fails midway can
 
 Send `x-llmproxy-session: <1–128 visible ASCII characters>` to keep a conversation on one route: the route that last served the session is tried first while it is a candidate. Any other value is ignored. The map is per process, holds at most 10 000 sessions (the oldest is dropped) and forgets a session after an hour.
 
+Pool requests are counted on the metrics listener. `pool` is the pool name and `route` is `<provider>/<model>`, both from config, so the series stay bounded:
+
+| Counter | Labels | Counts |
+|---|---|---|
+| `llm3_pool_requests_total` | `pool`, `outcome` | Each chat or responses request: `served` (an upstream answer was relayed), `exhausted` (`503` `pool_exhausted`) or `rejected` (`400` or `413` before any upstream call). |
+| `llm3_pool_attempts_total` | `pool`, `route`, `result` | Each upstream attempt: `ok` (relayed), `failover_5xx`, `failover_429`, `failover_error` (connect error or timeout) or `auth_failure` (`401` or `403`). |
+| `llm3_pool_auth_failures_total` | `pool`, `route` | Attempts whose provider refused the key. |
+| `llm3_pool_charged_responses_total` | `pool`, `route` | Relayed responses that reported a cost above zero. |
+
+The proxy reads every relayed pool response as it passes, without changing a byte: a JSON body whole, an event stream line by line. Pool attempts send `Accept-Encoding: identity` in place of the client's, so the provider answers uncompressed and the body stays readable. A `cost` above zero, top level, in `usage` (OpenRouter's `usage.cost`) or in `response.usage` (the `response.completed` event of a streamed `/responses`), as a number or a decimal string, counts the response once and logs an `error` naming the pool and route, never the body. A body or stream line over 1 MiB is not inspected. The counter only sees charges the provider reports in the response, so it is an alarm, not a bill: **alert on any increase** of `llm3_pool_charged_responses_total`, and also on `llm3_pool_auth_failures_total`. Both start at `0` for every configured route, so the first increase is visible.
+
 ## Behaviour
 
 **Authentication.** `Authorization: Bearer <token>` or `x-api-key: <token>`. Legacy tokens are compared without short-circuiting on the first differing byte; personal tokens are verified against stored hashes, at most 4 at a time (one per CPU on smaller hosts); further personal-token requests queue in arrival order for up to 10 s (or `max_wait`, if shorter), then get `429`. Authentication runs before forwarding, so an unknown path without a token gets `401`, not `404`. Duplicate or conflicting authentication headers get `401`. `/healthz` needs no token.
@@ -266,9 +277,13 @@ llm3_http_request_duration_seconds{route}         histogram
 llm3_postgres_available                          gauge
 llm3_provider_credentials{provider,state}         gauge
 llm3_credential_operations_total{provider,operation,outcome} counter
+llm3_pool_requests_total{pool,outcome}            counter
+llm3_pool_attempts_total{pool,route,result}       counter
+llm3_pool_auth_failures_total{pool,route}         counter
+llm3_pool_charged_responses_total{pool,route}     counter
 ```
 
-`route` is a configured route name, `healthz`, or `other` (rejected before routing).
+`route` is a configured route name, `pool:<name>` for a pool, `healthz`, or `other` (rejected before routing). The `llm3_pool_*` counters are described under [free-model pools](#free-model-pools-pool-pool_provider-quota_domain); their `route` is `<provider>/<model>`.
 
 Credential telemetry accepts only fixed labels: provider `anthropic`; states `active`, `invalid`, `removed`, `unavailable`; operations `install`, `replace`, `remove`, `invalidate`, `reencrypt`; outcomes `success`, `conflict`, `not_found`, `unavailable`. No identity, token, namespace, host, key ID, error text or model becomes a credential metric label. Request metrics retain their existing route/status labels, including a configured `claude` route.
 
@@ -286,7 +301,7 @@ On `SIGTERM` or `SIGINT` the proxy stops accepting and lets in-flight and held r
 
 ## Not yet implemented
 
-Tracked as issues: a zero-cost model pool ([#1](https://github.com/StephanMeijer/llmproxy/issues/1), design in [`docs/pools.md`](docs/pools.md)), a per-person ChatGPT subscription adapter using Responses ([#19](https://github.com/StephanMeijer/llmproxy/issues/19)), and Chat Completions compatibility for that adapter ([#20](https://github.com/StephanMeijer/llmproxy/issues/20)). Static limit state remains per-process; only Claude limits use shared PostgreSQL admission.
+Tracked as issues: a per-person ChatGPT subscription adapter using Responses ([#19](https://github.com/StephanMeijer/llmproxy/issues/19)), and Chat Completions compatibility for that adapter ([#20](https://github.com/StephanMeijer/llmproxy/issues/20)). Static limit state remains per-process; only Claude limits use shared PostgreSQL admission.
 
 ## Development
 

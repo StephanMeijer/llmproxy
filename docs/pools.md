@@ -1,9 +1,12 @@
 # Free-model pools: design
 
-Status: decided for [#1](https://github.com/StephanMeijer/llmproxy/issues/1); answers
-[#26](https://github.com/StephanMeijer/llmproxy/issues/26). Nothing here is implemented yet; the
-config sub-issue ([#27](https://github.com/StephanMeijer/llmproxy/issues/27)) starts from the
-sketch at the end.
+Status: implemented for [#1](https://github.com/StephanMeijer/llmproxy/issues/1); answers
+[#26](https://github.com/StephanMeijer/llmproxy/issues/26). Config
+([#27](https://github.com/StephanMeijer/llmproxy/issues/27)), routing and failover
+([#28](https://github.com/StephanMeijer/llmproxy/issues/28)), free proof
+([#29](https://github.com/StephanMeijer/llmproxy/issues/29)) and metrics with a charge alarm
+([#30](https://github.com/StephanMeijer/llmproxy/issues/30)) are in place; the README documents
+the behaviour and the metrics.
 
 A pool is one endpoint that fails over across a reviewed list of free models. Its one hard rule:
 **the proxy never sends a pool request that could cost money.** Every rule below closes a route
