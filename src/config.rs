@@ -393,8 +393,8 @@ impl CredentialEncryptionConfig {
     }
 }
 
-/// An http(s) URL with a host and no credentials, query or fragment: adapter and pool upstreams.
-fn http_upstream(text: &str) -> Option<Url> {
+/// An http(s) URL with a host and no credentials, query or fragment: every upstream.
+pub(crate) fn http_upstream(text: &str) -> Option<Url> {
     Url::parse(text).ok().filter(|url| {
         matches!(url.scheme(), "http" | "https")
             && url.host().is_some()
