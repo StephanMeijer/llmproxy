@@ -288,6 +288,27 @@ fn refuses_upstreams_that_are_not_http_urls() {
 }
 
 #[test]
+fn route_upstreams_refuse_credentials_query_and_fragment() {
+    // The request path is appended to the upstream, so a query or fragment would swallow it.
+    for upstream in [
+        "https://x.example/openai?api-version=2024-10-21",
+        "https://x.example/v1#a",
+        "https://user:pass@x.example/v1",
+    ] {
+        let why = refused(&format!(
+            "[[route]]\nname = \"a\"\nupstream = \"{upstream}\"\n"
+        ));
+        assert!(
+            why.contains(
+                "route a: upstream must be an http(s) URL without credentials, query or fragment"
+            ),
+            "{upstream:?}: {why}"
+        );
+        assert!(!why.contains("pass"), "{why}");
+    }
+}
+
+#[test]
 fn refuses_invalid_header_names_and_values() {
     let name = refused(
         "[[route]]\nname = \"a\"\nupstream = \"http://h\"\nheaders = { \"bad name\" = \"v\" }\n",

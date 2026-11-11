@@ -130,10 +130,11 @@ impl Route {
                 "route {name:?}: name must be non-empty and use only [A-Za-z0-9_-]"
             )));
         }
-        let upstream = Url::parse(&cfg.upstream)
-            .ok()
-            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
-            .ok_or_else(|| ConfigError(format!("route {name}: upstream must be an http(s) URL")))?;
+        let upstream = crate::config::http_upstream(&cfg.upstream).ok_or_else(|| {
+            ConfigError(format!(
+                "route {name}: upstream must be an http(s) URL without credentials, query or fragment"
+            ))
+        })?;
         let mut base = upstream.to_string();
         if !base.ends_with('/') {
             base.push('/');

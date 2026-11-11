@@ -60,7 +60,7 @@ Any string value may contain `${VAR}`, filled in from the environment. An unset 
 | Key | Meaning |
 |---|---|
 | `name` | Path prefix `/<name>/`. Letters, digits, `-` and `_` only; must be unique. |
-| `upstream` | `http(s)` base URL the rest of the path is appended to. |
+| `upstream` | `http(s)` base URL without credentials, query or fragment; the rest of the path is appended to it. |
 | `headers` | Headers set on every forwarded request. An empty value removes the header. |
 | `retry_429` | Default `true`. Hold and retry an upstream `429` until `max_wait` runs out. Set `false` where a `429` means the quota is spent, because retrying then only delays the same answer. |
 
